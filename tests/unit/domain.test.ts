@@ -169,6 +169,39 @@ test('eventos são classes concretas com envelope estável e dados imutáveis', 
   expect(event.toJSON().version).toBe(1);
   expect(event.eventType).toBe('WagerTransactionProcessed');
 });
+test('referências não atravessam provedor, jogador, wallet, moeda ou rodada', () => {
+  const state: TransactionState = {
+    id: 'reference',
+    providerId: 'provider',
+    externalTransactionId: 'external',
+    idempotencyKey: 'reference-key',
+    payloadHash: 'reference-hash',
+    playerId: 'player',
+    walletId: 'wallet',
+    roundId: 'round',
+    gameId: 'game',
+    kind: 'BET',
+    money: money('10.00'),
+    referenceExternalTransactionId: undefined,
+    createdAt: new Date(),
+    status: 'PROCESSED',
+    referenceTransactionId: undefined,
+    failureCode: undefined,
+    processedAt: new Date(),
+  };
+  const win = transaction('WIN', 'external');
+  expect(() => win.validateReference(WagerTransaction.rehydrate(state))).not.toThrow();
+  for (const change of [
+    { providerId: 'other' },
+    { playerId: 'other' },
+    { walletId: 'other' },
+    { money: money('10.00', 'USD') },
+    { roundId: 'other' },
+  ])
+    expect(() => win.validateReference(WagerTransaction.rehydrate({ ...state, ...change }))).toThrow(
+      'REFERENCE_CONTEXT_MISMATCH',
+    );
+});
 test('inbox/outbox têm transições explícitas e backoff limitado', () => {
   const inbox = InboxMessage.receive({ messageId: 'm', consumerName: 'c', payloadHash: 'h' });
   inbox.markProcessed(new Date());

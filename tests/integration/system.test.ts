@@ -929,3 +929,474 @@ test.skipIf(!process.env.TEST_BROKER)(
   },
   30000,
 );
+
+test('contratos HTTP adversariais rejeitam entradas inválidas sem persistir efeitos', async () => {
+  const w = await open();
+  const { idempotencyKey, ...valid } = command(w);
+  const invalid: unknown[] = [
+    null,
+    {},
+    { ...valid, kind: 'OPENING' },
+    { ...valid, providerId: '__system__' },
+    { ...valid, providerId: ' \t' },
+    { ...valid, externalTransactionId: 'invalid\u0000id' },
+    { ...valid, playerId: 'not-a-uuid' },
+    { ...valid, walletId: 'not-a-uuid' },
+    { ...valid, kind: 'REFUND' },
+    { ...valid, kind: 'ROLLBACK' },
+    { ...valid, referenceExternalTransactionId: 'unwanted' },
+    { ...valid, kind: 'LOSS', referenceExternalTransactionId: 'unwanted' },
+    ...['-1.00', '1e2', 'NaN', 'Infinity', '', '1.001', '1', '1.0', '+1.00', ' 1.00'].map((amount) => ({
+      ...valid,
+      money: { amount, currency: 'BRL' },
+    })),
+    { ...valid, money: { amount: 10, currency: 'BRL' } },
+    { ...valid, money: { amount: '1.00', currency: 'USD' } },
+    { ...valid, money: { amount: `${'9'.repeat(37)}.00`, currency: 'BRL' } },
+  ];
+  for (const body of invalid)
+    expect((await http(apis[0]!, '/wagering/transactions', body, idempotencyKey)).status).toBe(400);
+  expect((await http(apis[1]!, '/wagering/transactions', valid)).status).toBe(400);
+  const first = await submit({ ...valid, idempotencyKey });
+  expect(first.status).toBe(200);
+  expect(first.data.idempotentReplay).toBe(false);
+  for (const kind of ['BET', 'WIN', 'REFUND', 'ROLLBACK'] as const) {
+    const zero = command(
+      w,
+      kind,
+      '0.00',
+      ['REFUND', 'ROLLBACK'].includes(kind) ? valid.externalTransactionId : undefined,
+    );
+    const result = await submit(zero);
+    expect(result.status).toBe(422);
+    expect(result.data.failureCode).toBe('AMOUNT_MUST_BE_POSITIVE');
+  }
+  expect((await balance(w)).balance.amount).toBe('90.00');
+  expect(await ledgerCount(w)).toBe(2);
+  expect(
+    await scalar(
+      "SELECT count(*)::text AS count FROM wager_transactions WHERE wallet_id=? AND status='PROCESSED'",
+      [w.id],
+    ),
+  ).toBe(2);
+  await integrity();
+});
+
+test('JSON malformado, mídia incompatível e payload grande preservam HTTP 4xx e correlação', async () => {
+  const w = await open();
+  for (const sample of [
+    { type: 'application/json', body: '{"broken":', status: 400 },
+    { type: 'application/xml', body: '<transaction/>', status: 415 },
+    { type: 'application/json', body: JSON.stringify({ padding: 'x'.repeat(32769) }), status: 413 },
+  ]) {
+    const correlationId = `contract-${randomUUID()}`;
+    const response = await fetch(`${apis[0]!.url}/wagering/transactions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': sample.type,
+        'X-Correlation-Id': correlationId,
+        'Idempotency-Key': randomUUID(),
+      },
+      body: sample.body,
+    });
+    expect(response.status).toBe(sample.status);
+    expect(response.headers.get('X-Correlation-Id')).toBe(correlationId);
+    const error = (await response.json()) as { correlationId: string; retryable: boolean };
+    expect(error.correlationId).toBe(correlationId);
+    expect(error.retryable).toBe(false);
+  }
+  expect((await balance(w)).balance.amount).toBe('100.00');
+  expect(await ledgerCount(w)).toBe(1);
+  await integrity();
+});
+
+test('dinheiro acima de 2^53 atravessa HTTP, PostgreSQL e ledger sem perder centavos', async () => {
+  const w = await open('9007199254740993.01');
+  const c = command(w, 'BET', '0.01');
+  const { idempotencyKey, ...body } = c;
+  const first = await http<ProcessingResult>(
+    apis[0]!,
+    '/wagering/transactions',
+    {
+      ...body,
+      playerId: body.playerId.toUpperCase(),
+      walletId: body.walletId.toUpperCase(),
+      money: { amount: '0000.01', currency: 'BRL' },
+      idempotencyKey: 'ignored-body-key',
+    },
+    idempotencyKey,
+  );
+  expect(first.status).toBe(200);
+  expect(first.data.balance!.amount).toBe('9007199254740993.00');
+  await submit(command(w, 'WIN', '0.03'), 1);
+  expect((await balance(w)).balance.amount).toBe('9007199254740993.03');
+  expect((await submit(c, 2)).data).toEqual({ ...first.data, idempotentReplay: true });
+  expect(
+    await db.query<{ balance_after: string }>(
+      'SELECT balance_after::text FROM wallet_ledger WHERE wallet_id=? ORDER BY wallet_version',
+      [w.id],
+    ),
+  ).toEqual([
+    { balance_after: '9007199254740993.01' },
+    { balance_after: '9007199254740993.00' },
+    { balance_after: '9007199254740993.03' },
+  ]);
+  await integrity();
+});
+
+test('identidades globais em wallets distintas conflitam sem bloquear o escopo de outro provedor', async () => {
+  const wallets = [await open(), await open()];
+  for (const mode of ['key', 'external'] as const) {
+    const external = randomUUID();
+    const commands = wallets.map((w, i) => ({
+      ...command(w),
+      externalTransactionId: mode === 'external' ? external : randomUUID(),
+      idempotencyKey: mode === 'key' ? `global-${external}` : `external-${external}-${i}`,
+    }));
+    const responses = await Promise.all(commands.map((c, i) => submit(c, i)));
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
+    const conflict = responses.find((r) => r.status === 409)!;
+    expect((conflict.data as unknown as { code: string }).code).toBe(
+      mode === 'key' ? 'IDEMPOTENCY_CONFLICT' : 'EXTERNAL_TRANSACTION_CONFLICT',
+    );
+  }
+  const scoped = randomUUID();
+  const independent = wallets.map((w, i) => ({
+    ...command(w),
+    providerId: `scope-${i}`,
+    externalTransactionId: scoped,
+  }));
+  expect((await Promise.all(independent.map((c, i) => submit(c, i)))).every((r) => r.status === 200)).toBe(
+    true,
+  );
+  const balances = await Promise.all(wallets.map(balance));
+  expect(balances.map((w) => BigInt(w.balance.amount.replace('.', ''))).reduce((a, b) => a + b)).toBe(16000n);
+  await integrity();
+});
+
+test('WIN, REFUNDs e ROLLBACK fora de ordem disputam a referência com dois workers', async () => {
+  const w = await open();
+  const bet = command(w, 'BET', '40.00');
+  const dependents = [
+    command(w, 'WIN', '60.00', bet.externalTransactionId),
+    command(w, 'REFUND', '40.00', bet.externalTransactionId),
+    command(w, 'REFUND', '40.00', bet.externalTransactionId),
+    command(w, 'ROLLBACK', '40.00', bet.externalTransactionId),
+  ];
+  const pending = await Promise.all(dependents.map((c, i) => submit(c, i)));
+  expect(pending.every((r) => r.status === 202)).toBe(true);
+  const workers = [await start('references'), await start('references')];
+  try {
+    expect((await submit(bet, 2)).status).toBe(200);
+    await eventually(
+      () =>
+        scalar(
+          "SELECT count(*)::text AS count FROM wager_transactions WHERE wallet_id=? AND status='PENDING_REFERENCE'",
+          [w.id],
+        ),
+      (n) => n === 0,
+    );
+    const results = await Promise.all(dependents.map((c, i) => submit(c, i)));
+    expect(results[0]!.status).toBe(200);
+    expect(results[3]!.status).toBe(200);
+    expect(
+      results
+        .slice(1, 3)
+        .map((r) => r.status)
+        .sort(),
+    ).toEqual([200, 422]);
+    expect(results.slice(1, 3).find((r) => r.status === 422)!.data.failureCode).toBe(
+      'REVERSAL_ALREADY_APPLIED',
+    );
+    expect((await balance(w)).balance.amount).toBe('200.00');
+    expect((await balance(w)).version).toBe(5);
+    expect(await ledgerCount(w)).toBe(5);
+    for (const initial of pending)
+      expect(
+        await scalar(
+          "SELECT count(*)::text AS count FROM outbox_messages WHERE aggregate_id=? AND event_type='WagerTransactionPendingReference'",
+          [initial.data.transactionId],
+        ),
+      ).toBe(1);
+    await submit(command(w, 'BET', '1.00'));
+    for (let i = 0; i < dependents.length; i++)
+      expect((await submit(dependents[i]!, 2)).data).toEqual(results[i]!.data);
+  } finally {
+    await Promise.all(workers.map((worker) => worker.stop()));
+  }
+  await integrity();
+});
+
+test('worker de referência com lease vencida não sobrescreve decisão do sucessor', async () => {
+  const w = await open();
+  const bet = command(w, 'BET', '20.00');
+  const refund = command(w, 'REFUND', '20.00', bet.externalTransactionId);
+  const pending = await submit(refund);
+  const stale = await start('api,references', {
+    TEST_FAULT_POINT: 'reference-before-process',
+    WORK_LEASE_MS: '200',
+  });
+  try {
+    const claimed = await stale.wait('barrier');
+    expect(claimed!.transactionId).toBe(pending.data.transactionId);
+    expect((await submit(bet)).status).toBe(200);
+    await eventually(
+      () =>
+        scalar(
+          'SELECT count(*)::text AS count FROM wager_transactions WHERE id=? AND lease_until<=clock_timestamp()',
+          [pending.data.transactionId],
+        ),
+      (n) => n === 1,
+    );
+    const replacement = await start('references');
+    try {
+      await waitTransaction(refund);
+    } finally {
+      await replacement.stop();
+    }
+    await submit(command(w, 'WIN', '5.00'));
+    const snapshot = await db.query('SELECT * FROM wager_transactions WHERE id=?', [
+      pending.data.transactionId,
+    ]);
+    stale.child.send({ type: 'release-fault' });
+    await eventually(
+      async () => (await fetch(`${stale.url}/metrics`)).text(),
+      (text) => text.includes('wager_duplicates_total{source="reference"} 1'),
+    );
+    expect(
+      await db.query('SELECT * FROM wager_transactions WHERE id=?', [pending.data.transactionId]),
+    ).toEqual(snapshot);
+    expect((await submit(refund)).data.balance!.amount).toBe('100.00');
+    expect((await balance(w)).balance.amount).toBe('105.00');
+    expect(await ledgerCount(w)).toBe(4);
+  } finally {
+    await stale.stop('SIGKILL');
+  }
+  await integrity();
+});
+
+test('consultas preservam resultado original e recusam cursor de outra wallet ou inválido', async () => {
+  const w = await open();
+  const c = command(w);
+  const result = await submit(c);
+  await submit(command(w, 'WIN', '5.00'));
+  const queried = await http<ProcessingResult>(
+    apis[1]!,
+    `/wagering/transactions/${result.data.transactionId}`,
+  );
+  const external = await http<ProcessingResult>(
+    apis[2]!,
+    `/providers/${c.providerId}/wagering/transactions/${c.externalTransactionId}`,
+  );
+  expect(queried.status).toBe(200);
+  expect(external.data).toEqual(queried.data);
+  expect(queried.data.balance!.amount).toBe('90.00');
+  for (const path of [
+    `/wallets/${randomUUID()}`,
+    `/wallets/${randomUUID()}/ledger`,
+    `/wagering/transactions/${randomUUID()}`,
+    `/providers/absent/wagering/transactions/${randomUUID()}`,
+  ])
+    expect((await http(apis[0]!, path)).status).toBe(404);
+  expect((await http(apis[0]!, '/wallets/invalid-uuid')).status).toBe(400);
+  const page = await http<{ nextCursor: string }>(apis[0]!, `/wallets/${w.id}/ledger?limit=1`);
+  const other = await open();
+  expect((await http(apis[0]!, `/wallets/${other.id}/ledger?cursor=${page.data.nextCursor}`)).status).toBe(
+    400,
+  );
+  for (const limit of ['0', '-1', '101', '1.5', 'Infinity', 'NaN'])
+    expect((await http(apis[0]!, `/wallets/${w.id}/ledger?limit=${limit}`)).status).toBe(400);
+  for (const cursor of [
+    'invalid',
+    Buffer.from(JSON.stringify({ v: 1, walletId: w.id, upper: 1000, last: 1001 })).toString('base64url'),
+  ])
+    expect((await http(apis[0]!, `/wallets/${w.id}/ledger?cursor=${cursor}`)).status).toBe(400);
+  await integrity();
+});
+
+test('reconciliação usa um snapshot consistente quando há commit entre suas duas leituras', async () => {
+  const w = await open();
+  const observer = await start('api', { TEST_FAULT_POINT: 'reconciliation-after-wallet' });
+  try {
+    const check = http<{
+      storedBalance: { amount: string };
+      calculatedBalance: { amount: string };
+      consistent: boolean;
+    }>(observer, `/wallets/${w.id}/reconciliation`, {});
+    await observer.wait('barrier');
+    expect((await submit(command(w, 'BET', '5.00'), 2)).status).toBe(200);
+    observer.child.send({ type: 'release-fault' });
+    const result = await check;
+    expect(result.status).toBe(200);
+    expect(result.data.storedBalance.amount).toBe('100.00');
+    expect(result.data.calculatedBalance.amount).toBe('100.00');
+    expect(result.data.consistent).toBe(true);
+    expect((await balance(w)).balance.amount).toBe('95.00');
+  } finally {
+    await observer.stop('SIGKILL');
+  }
+  await integrity();
+});
+
+test('conexão HTTP perdida após commit é recuperada pela mesma chave em outra instância', async () => {
+  const w = await open();
+  const c = command(w);
+  const { idempotencyKey, ...body } = c;
+  const doomed = await start('api', { TEST_FAULT_POINT: 'after-commit' });
+  const lost = http<ProcessingResult>(doomed, '/wagering/transactions', body, idempotencyKey).then(
+    (response) => ({ response, error: undefined }),
+    (error: unknown) => ({ response: undefined, error }),
+  );
+  await doomed.wait('barrier');
+  expect((await balance(w)).balance.amount).toBe('90.00');
+  await doomed.stop('SIGKILL');
+  expect((await lost).error).toBeInstanceOf(Error);
+  await submit(command(w, 'WIN', '5.00'));
+  const replay = await submit(c, 2);
+  expect(replay.status).toBe(200);
+  expect(replay.data.idempotentReplay).toBe(true);
+  expect(replay.data.balance!.amount).toBe('90.00');
+  expect(replay.data.walletVersion).toBe(2);
+  expect((await balance(w)).balance.amount).toBe('95.00');
+  expect(
+    await scalar('SELECT count(*)::text AS count FROM wallet_ledger WHERE transaction_id=?', [
+      replay.data.transactionId,
+    ]),
+  ).toBe(1);
+  expect(
+    await scalar('SELECT count(*)::text AS count FROM outbox_messages WHERE aggregate_id=?', [
+      replay.data.transactionId,
+    ]),
+  ).toBe(1);
+  await integrity();
+});
+
+test('sequência de 120 operações com seed fixa corresponde a um modelo financeiro independente', async () => {
+  // The oracle uses only integer cents and the contract rules, never application/domain arithmetic.
+  const decimal = (cents: bigint) => `${cents / 100n}.${(cents % 100n).toString().padStart(2, '0')}`;
+  let seed = 0x4a554e47n;
+  const random = () => {
+    seed = (1664525n * seed + 1013904223n) & 0xffffffffn;
+    return seed;
+  };
+  type Reference = { kind: 'BET' | 'WIN' | 'REFUND'; externalId: string; cents: bigint };
+  type Entry = {
+    transaction_id: string;
+    direction: 'CREDIT' | 'DEBIT';
+    amount: string;
+    balance_before: string;
+    balance_after: string;
+    wallet_version: number;
+  };
+  const w = await open();
+  const [opening] = await db.query<{ id: string }>(
+    "SELECT id FROM wager_transactions WHERE wallet_id=? AND kind='OPENING'",
+    [w.id],
+  );
+  let expectedBalance = 10000n;
+  let expectedVersion = 1;
+  const entries: Entry[] = [
+    {
+      transaction_id: opening!.id,
+      direction: 'CREDIT',
+      amount: '100.00',
+      balance_before: '0.00',
+      balance_after: '100.00',
+      wallet_version: 1,
+    },
+  ];
+  const references: Reference[] = [];
+  const reversed = new Set<string>();
+  const snapshots: { command: WagerCommand; result: ProcessingResult }[] = [];
+
+  async function exercise(c: WagerCommand, cents: bigint, reference?: Reference) {
+    const before = expectedBalance;
+    let failure: string | undefined;
+    let signed =
+      c.kind === 'LOSS'
+        ? 0n
+        : c.kind === 'BET' || (c.kind === 'ROLLBACK' && reference!.kind !== 'BET')
+          ? -cents
+          : cents;
+    const reversal = c.kind === 'REFUND' || c.kind === 'ROLLBACK';
+    if (reversal && cents !== reference!.cents) failure = 'REFERENCE_AMOUNT_MISMATCH';
+    else if (reversal && reversed.has(`${reference!.externalId}:${c.kind}`))
+      failure = 'REVERSAL_ALREADY_APPLIED';
+    else if (signed < 0n && expectedBalance + signed < 0n)
+      failure = c.kind === 'BET' ? 'INSUFFICIENT_FUNDS' : 'REVERSAL_INSUFFICIENT_FUNDS';
+    if (!failure) {
+      expectedBalance += signed;
+      if (signed !== 0n) expectedVersion++;
+      if (reversal) reversed.add(`${reference!.externalId}:${c.kind}`);
+      if (c.kind === 'BET' || c.kind === 'WIN' || c.kind === 'REFUND')
+        references.push({ kind: c.kind, externalId: c.externalTransactionId, cents });
+    }
+    const result = await submit(c, snapshots.length);
+    expect(result.status).toBe(failure ? 422 : 200);
+    expect(result.data.status).toBe(failure ? 'REJECTED' : 'PROCESSED');
+    expect(result.data.failureCode).toBe(failure);
+    expect(result.data.balance!.amount).toBe(decimal(expectedBalance));
+    expect(result.data.walletVersion).toBe(expectedVersion);
+    snapshots.push({ command: c, result: result.data });
+    if (!failure && signed !== 0n)
+      entries.push({
+        transaction_id: result.data.transactionId,
+        direction: signed > 0n ? 'CREDIT' : 'DEBIT',
+        amount: decimal(cents),
+        balance_before: decimal(before),
+        balance_after: decimal(expectedBalance),
+        wallet_version: expectedVersion,
+      });
+  }
+
+  await exercise(command(w, 'BET', '10.00'), 1000n);
+  const kinds = ['BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'] as const;
+  for (let i = 0; i < 120; i++) {
+    const kind = kinds[i % kinds.length]!;
+    let cents = (random() % 15000n) + 1n;
+    let reference: Reference | undefined;
+    if (kind === 'REFUND' || kind === 'ROLLBACK' || (kind === 'WIN' && random() % 2n === 0n)) {
+      const pool = kind === 'ROLLBACK' ? references : references.filter((r) => r.kind === 'BET');
+      reference = pool[Number(random() % BigInt(pool.length))]!;
+      if (kind !== 'WIN') cents = reference.cents + (i % 13 === 0 ? 1n : 0n);
+    }
+    if (kind === 'LOSS' && i % 2 === 0) cents = 0n;
+    await exercise(command(w, kind, decimal(cents), reference?.externalId), cents, reference);
+  }
+  for (const snapshot of snapshots.filter((_, i) => i % 9 === 0))
+    expect((await submit(snapshot.command, 2)).data).toEqual({ ...snapshot.result, idempotentReplay: true });
+  const stored = await balance(w);
+  expect(stored.balance.amount).toBe(decimal(expectedBalance));
+  expect(stored.version).toBe(expectedVersion);
+  expect(
+    await db.query<Entry>(
+      'SELECT transaction_id,direction,amount::text,balance_before::text,balance_after::text,wallet_version FROM wallet_ledger WHERE wallet_id=? ORDER BY wallet_version',
+      [w.id],
+    ),
+  ).toEqual(entries);
+  const processed = snapshots.filter((s) => s.result.status === 'PROCESSED').length;
+  expect(processed).toBeGreaterThan(0);
+  expect(processed).toBeLessThan(snapshots.length);
+  expect(
+    await scalar(
+      "SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND event_type='WalletBalanceChanged'",
+      [w.id],
+    ),
+  ).toBe(entries.length);
+  expect(
+    await scalar(
+      "SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND event_type='WagerTransactionProcessed'",
+      [w.id],
+    ),
+  ).toBe(processed + 1);
+  expect(
+    await scalar(
+      "SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND event_type='WagerTransactionRejected'",
+      [w.id],
+    ),
+  ).toBe(snapshots.length - processed);
+  expect(
+    await scalar('SELECT count(*)::text AS count FROM wager_transactions WHERE wallet_id=?', [w.id]),
+  ).toBe(snapshots.length + 1);
+  await integrity();
+}, 30000);

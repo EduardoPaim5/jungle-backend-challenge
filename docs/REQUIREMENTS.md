@@ -36,3 +36,5 @@ Migrations são revertidas completamente e reaplicadas. Ataques SQL tentam saldo
 ## Localizar os testes
 
 Todos os cenários de sistema estão em `tests/integration/system.test.ts`, com nomes descritivos correspondentes à matriz. Unidade em `tests/unit/domain.test.ts`. Os dois testes de reinício de containers usam `TEST_BROKER`; ausência da variável aparece como skipped, nunca como prova executada. Resultados registrados em [results/README.md](results/README.md).
+
+A suíte contém 24 testes unitários e 32 de integração. A [validação adversarial](results/adversarial.md) detalha dez cenários adicionais, incluindo perda de resposta HTTP após commit, lease antiga de referência, snapshot concorrente e 120 operações comparadas com um oráculo financeiro independente.

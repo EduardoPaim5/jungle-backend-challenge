@@ -134,6 +134,7 @@ export class ReferenceWorker extends LoopWorker {
     await concurrent(rows, 5, async (row) => {
       this.wagering.metrics.retries.inc({ component: 'reference' });
       try {
+        await fault('reference-before-process', { transactionId: row.id });
         await this.wagering.process(commandFromRow(row), {
           source: 'reference',
           correlationId: row.correlation_id,

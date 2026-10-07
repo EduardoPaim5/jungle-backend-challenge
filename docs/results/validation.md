@@ -7,9 +7,9 @@ Data: 7 de outubro de 2026. Bun 1.4.2, NestJS 12.1.2, MikroORM 7.2.4, TypeScript
 | `bun run format:check`                                                  | Aprovada                                                                            |
 | `bun run typecheck`                                                     | Aprovada, modo estrito                                                              |
 | `bun audit`                                                             | Nenhuma vulnerabilidade conhecida reportada em 155 pacotes                          |
-| `bun run test`                                                          | 23 testes unitários aprovados                                                       |
-| `TEST_BROKER=localstack bun run verify`                                 | 23 unitários + 22 integrações aprovados, sem skipped                                |
-| `TEST_BROKER=ministack bun run verify`                                  | 23 unitários + 22 integrações aprovados, sem skipped                                |
+| `bun run test`                                                          | 24 testes unitários aprovados                                                       |
+| `TEST_BROKER=localstack bun run verify`                                 | 24 unitários + 32 integrações aprovados, sem skipped                                |
+| `TEST_BROKER=ministack bun run verify`                                  | 24 unitários + 32 integrações aprovados, sem skipped                                |
 | Migrações up/down completo/up                                           | Aprovadas em bancos isolados nos dois brokers                                       |
 | Crashes, redelivery, publisher antigo e reinício real de SQS/PostgreSQL | Aprovados nos dois brokers                                                          |
 | Shutdown com devolução atrasada por barreira e visibilidade de 30 s     | Mensagem recuperada imediatamente após SIGTERM, sem esperar a expiração natural     |
@@ -19,5 +19,7 @@ Data: 7 de outubro de 2026. Bun 1.4.2, NestJS 12.1.2, MikroORM 7.2.4, TypeScript
 | Revisão de segredo                                                      | Token ausente dos arquivos versionáveis; `.env.local` ignorado pelo Git e Docker    |
 
 As integrações usam ao menos três processos Bun simultâneos e conexões PostgreSQL/SQS reais. Os checks finais verificam saldo reconstruído, ledger, versões e decisões, além dos checks específicos de inbox/outbox/DLQ. A recuperação do broker inclui persistência de mensagens após shutdown normal; não mede durabilidade do emulador após SIGKILL.
+
+A [rodada adversarial adicional](adversarial.md) acrescentou contratos HTTP, precisão no caminho completo, identidades entre wallets, concorrência de referências, lease antiga, perda de resposta HTTP, snapshot de reconciliação e um modelo financeiro independente com seed reproduzível.
 
 As ações remotas da CI são consultáveis na aba Actions do repositório. Este registro descreve o ambiente local; resultados da CI são evidência separada. Cada execução de integração usa um banco e filas próprios e remove seus recursos ao final.

@@ -4,6 +4,7 @@ import { Observability, logger } from '../infrastructure/observability.js';
 import { Money } from '../domain/money.js';
 import { ServiceError } from './contracts.js';
 import type { TransactionRow } from './wagering.js';
+import { fault } from '../infrastructure/faults.js';
 
 export function uuid(value: string): string {
   if (!z.uuid().safeParse(value).success) throw new ServiceError('INVALID_REQUEST', 400);
@@ -120,6 +121,7 @@ export class Queries {
         em,
       );
       if (!w) throw new ServiceError('WALLET_NOT_FOUND', 404);
+      await fault('reconciliation-after-wallet');
       const [sum] = await this.db.query<{ balance: string; count: string }>(
         `SELECT COALESCE(sum(CASE direction WHEN 'CREDIT' THEN amount ELSE -amount END),0.00)::text as balance,
         count(*)::text as count FROM wallet_ledger WHERE wallet_id=?`,
