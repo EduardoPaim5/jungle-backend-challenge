@@ -12,7 +12,7 @@ Requisitos: **Bun 1.4.2**, Docker com Compose v2+ e portas locais `55432`/`4566`
 bun install --frozen-lockfile
 cp .env.example .env.local
 chmod 600 .env.local
-docker compose --profile portable up -d postgres ministack
+docker compose --profile portable up -d --wait postgres ministack
 bun run db:migrate
 bun run queues:init
 bun run demo
@@ -37,7 +37,7 @@ Crie um Developer Auth Token no [portal LocalStack](https://app.localstack.cloud
 
 ```bash
 docker compose --profile portable stop ministack
-docker compose --env-file .env.local --profile reference up -d postgres localstack
+docker compose --env-file .env.local --profile reference up -d --wait postgres localstack
 bun run queues:init
 TEST_BROKER=localstack bun run verify
 BROKER_LABEL=LocalStack bun run test:load
@@ -49,7 +49,7 @@ Para voltar ao perfil portátil:
 
 ```bash
 docker compose --profile reference stop localstack
-docker compose --profile portable up -d postgres ministack
+docker compose --profile portable up -d --wait postgres ministack
 bun run queues:init
 TEST_BROKER=ministack bun run verify
 ```

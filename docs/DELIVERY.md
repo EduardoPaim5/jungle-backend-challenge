@@ -12,7 +12,7 @@ https://github.com/EduardoPaim5/jungle-backend-challenge
 
 O README contém setup, demo com três processos, comandos de teste e exemplos HTTP/SQS. ARCHITECTURE explica as garantias financeiras, decisões e limitações; a matriz de requisitos e os resultados de validação estão em docs.
 
-Commit entregue: preencher com o hash final apresentado pelo GitHub.
+As validações automatizadas estão disponíveis na aba Actions do repositório.
 
 Fico à disposição para apresentar a solução e discutir as decisões técnicas.
 
