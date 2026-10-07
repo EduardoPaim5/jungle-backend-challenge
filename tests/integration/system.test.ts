@@ -1,0 +1,865 @@
+import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
+import { DeleteQueueCommand, GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
+import { Database } from '../../src/infrastructure/database.js';
+import { Queues } from '../../src/infrastructure/sqs.js';
+import type { ProcessingResult } from '../../src/application/contracts.js';
+import type { WagerCommand } from '../../src/domain/transaction.js';
+
+const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
+const rootUrl =
+  process.env.MIGRATION_DATABASE_URL ?? 'postgresql://jungle_owner:jungle_owner@localhost:55432/jungle';
+const databaseName = `jungle_test_${suffix}`;
+const ownerUrl = new URL(rootUrl);
+ownerUrl.pathname = `/${databaseName}`;
+const appUrl = new URL(ownerUrl);
+appUrl.username = 'jungle_app';
+appUrl.password = 'jungle_app';
+process.env.QUEUE_PREFIX = `test-${suffix}-`;
+process.env.SQS_WAIT_SECONDS = '1';
+process.env.SQS_VISIBILITY_SECONDS = '2';
+let root: Database;
+let owner: Database;
+let db: Database;
+let queues: Queues;
+interface App {
+  child: Bun.Subprocess<'ignore', 'ignore', 'pipe'>;
+  url: string;
+  wait(type: string): Promise<Record<string, unknown> | undefined>;
+  stop(signal?: 'SIGTERM' | 'SIGKILL'): Promise<void>;
+}
+const processes: App[] = [];
+const apis: App[] = [];
+interface WalletView {
+  id: string;
+  playerId: string;
+  balance: { amount: string; currency: string };
+  version: number;
+}
+async function eventually<T>(
+  check: () => Promise<T>,
+  accept: (value: T) => boolean,
+  timeout = 15000,
+): Promise<T> {
+  const end = Date.now() + timeout;
+  let latest: T | undefined;
+  while (Date.now() < end) {
+    latest = await check();
+    if (accept(latest)) return latest;
+    await Bun.sleep(30);
+  }
+  throw new Error(`Condition not reached: ${JSON.stringify(latest)}`);
+}
+async function start(roles: string, extra: Record<string, string> = {}): Promise<App> {
+  const messages: Record<string, unknown>[] = [];
+  const child = Bun.spawn([process.execPath, 'dist/src/main.js'], {
+    env: {
+      ...process.env,
+      NODE_ENV: 'test',
+      DATABASE_URL: appUrl.toString(),
+      PORT: '0',
+      LOG_LEVEL: 'error',
+      APP_ROLES: roles,
+      REFERENCE_POLL_MS: '25',
+      REFERENCE_BACKOFF_MS: '25',
+      OUTBOX_POLL_MS: '25',
+      SQS_HEARTBEAT_MS: '500',
+      WORK_LEASE_MS: '1500',
+      SHUTDOWN_GRACE_MS: '1000',
+      ...extra,
+    },
+    stdin: 'ignore',
+    stdout: 'ignore',
+    stderr: 'pipe',
+    ipc(message: unknown) {
+      if (message && typeof message === 'object') messages.push(message as Record<string, unknown>);
+    },
+  });
+  async function wait(type: string) {
+    return eventually(
+      async () => {
+        if (child.exitCode !== null)
+          throw new Error(`Child exited ${child.exitCode}: ${await new Response(child.stderr).text()}`);
+        return messages.find((message) => message.type === type);
+      },
+      Boolean,
+      10000,
+    );
+  }
+  const ready = await wait('ready');
+  const instance = {
+    child,
+    url: `http://127.0.0.1:${ready!.port}`,
+    wait,
+    async stop(signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM') {
+      if (child.exitCode === null) child.kill(signal);
+      await child.exited;
+    },
+  };
+  processes.push(instance);
+  return instance;
+}
+async function http<T>(app: App, path: string, body?: unknown, key?: string) {
+  const response = await fetch(`${app.url}${path}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { status: response.status, data: (await response.json()) as T };
+}
+async function open(amount = '100.00') {
+  const r = await http<WalletView>(apis[0]!, '/wallets', {
+    playerId: randomUUID(),
+    initialBalance: { amount, currency: 'BRL' },
+  });
+  if (r.status !== 201) throw new Error(`Opening failed: ${JSON.stringify(r)}`);
+  return r.data;
+}
+function command(
+  wallet: WalletView,
+  kind: WagerCommand['kind'] = 'BET',
+  amount = '10.00',
+  reference?: string,
+): WagerCommand {
+  const external = randomUUID();
+  return {
+    providerId: 'provider-a',
+    externalTransactionId: external,
+    idempotencyKey: `key-${external}`,
+    walletId: wallet.id,
+    playerId: wallet.playerId,
+    roundId: 'round-1',
+    gameId: 'game-1',
+    kind,
+    money: { amount, currency: 'BRL' },
+    ...(reference ? { referenceExternalTransactionId: reference } : {}),
+  };
+}
+async function submit(c: WagerCommand, index = 0) {
+  const { idempotencyKey, ...body } = c;
+  return http<ProcessingResult>(apis[index % apis.length]!, '/wagering/transactions', body, idempotencyKey);
+}
+async function balance(w: WalletView) {
+  return (await http<WalletView>(apis[0]!, `/wallets/${w.id}`)).data;
+}
+async function scalar(sql: string, params: unknown[] = []) {
+  return Number((await db.query<{ count: string }>(sql, params))[0]!.count);
+}
+async function ledgerCount(wallet: WalletView) {
+  return scalar('SELECT count(*)::text AS count FROM wallet_ledger WHERE wallet_id=?', [wallet.id]);
+}
+async function integrity() {
+  const broken = await db.query(`SELECT w.id FROM wallets w LEFT JOIN LATERAL
+    (SELECT COALESCE(sum(CASE direction WHEN 'CREDIT' THEN amount ELSE -amount END),0) AS balance,
+      COALESCE(max(wallet_version),1) AS version FROM wallet_ledger WHERE wallet_id=w.id) l ON true
+    WHERE w.balance<>l.balance OR w.version<>l.version OR w.balance<0`);
+  expect(broken).toEqual([]);
+  expect(
+    await scalar(`SELECT count(*)::text AS count FROM wager_transactions t WHERE t.status='PENDING'
+    OR (t.status='PROCESSED' AND t.kind<>'LOSS' AND (SELECT count(*) FROM wallet_ledger l WHERE l.transaction_id=t.id)<>1)
+    OR ((t.status<>'PROCESSED' OR t.kind='LOSS') AND EXISTS(SELECT 1 FROM wallet_ledger l WHERE l.transaction_id=t.id))`),
+  ).toBe(0);
+  const chain =
+    await db.query(`WITH entries AS (SELECT *,lag(balance_after) OVER(PARTITION BY wallet_id ORDER BY wallet_version) AS previous_balance,
+      lag(wallet_version) OVER(PARTITION BY wallet_id ORDER BY wallet_version) AS previous_version FROM wallet_ledger)
+    SELECT id FROM entries WHERE (previous_version IS NOT NULL AND (wallet_version<>previous_version+1 OR balance_before<>previous_balance))
+      OR (previous_version IS NULL AND (wallet_version NOT IN (1,2) OR balance_before<>0))`);
+  expect(chain).toEqual([]);
+}
+async function envelope(c: WagerCommand, id = randomUUID()) {
+  const body = JSON.stringify({
+    messageId: id,
+    type: 'WagerTransactionRequested',
+    occurredAt: new Date().toISOString(),
+    data: c,
+  });
+  await queues.send(queues.names.input, body, c.walletId, randomUUID());
+  return { id, body };
+}
+async function waitTransaction(c: WagerCommand, status = 'PROCESSED') {
+  return eventually(
+    () =>
+      db.query<{ status: string; id: string }>(
+        'SELECT id,status FROM wager_transactions WHERE idempotency_key=?',
+        [c.idempotencyKey],
+      ),
+    (rows) => rows[0]?.status === status,
+  );
+}
+async function inputDrained() {
+  await eventually(
+    async () => {
+      const r = await queues.client.send(
+        new GetQueueAttributesCommand({
+          QueueUrl: await queues.url(queues.names.input),
+          AttributeNames: [
+            'ApproximateNumberOfMessages',
+            'ApproximateNumberOfMessagesNotVisible',
+            'ApproximateNumberOfMessagesDelayed',
+          ],
+        }),
+      );
+      return Object.values(r.Attributes ?? {}).reduce((total, value) => total + Number(value), 0);
+    },
+    (x) => x === 0,
+  );
+}
+
+beforeAll(async () => {
+  root = await Database.connect(rootUrl);
+  await root.query(`CREATE DATABASE ${databaseName}`);
+  owner = await Database.connect(ownerUrl.toString());
+  await owner.orm.migrator.up();
+  await owner.orm.migrator.down({ to: 0 });
+  await owner.orm.migrator.up();
+  db = await Database.connect(appUrl.toString());
+  queues = new Queues();
+  await eventually(
+    async () => {
+      try {
+        await queues.bootstrap();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    Boolean,
+    60000,
+  );
+  for (let i = 0; i < 3; i++) apis.push(await start('api'));
+}, 90000);
+afterAll(async () => {
+  await Promise.allSettled(processes.map((app) => app.stop('SIGKILL')));
+  if (db) {
+    await integrity();
+    await db.close();
+  }
+  if (queues) {
+    await Promise.allSettled(
+      Object.values(queues.names).map(async (name) =>
+        queues.client.send(new DeleteQueueCommand({ QueueUrl: await queues.url(name) })),
+      ),
+    );
+    queues.close();
+  }
+  if (owner) await owner.close();
+  if (root) {
+    await root.query(`DROP DATABASE ${databaseName} WITH (FORCE)`);
+    await root.close();
+  }
+}, 20000);
+
+test('abertura positiva/zerada, saúde, OpenAPI e constraints reais', async () => {
+  const positive = await open();
+  const zero = await open('0.00');
+  expect(positive.version).toBe(1);
+  expect(zero.version).toBe(1);
+  expect(await ledgerCount(positive)).toBe(1);
+  expect(await ledgerCount(zero)).toBe(0);
+  expect((await http(apis[0]!, '/health/ready')).status).toBe(200);
+  expect((await http(apis[0]!, '/docs-json')).status).toBe(200);
+  await expect(db.query('UPDATE wallets SET balance=-1 WHERE id=?', [positive.id])).rejects.toThrow();
+  await expect(
+    db.query("UPDATE wallets SET balance='NaN'::numeric WHERE id=?", [positive.id]),
+  ).rejects.toThrow();
+  await expect(
+    db.query('UPDATE wallets SET balance=90,version=version+1 WHERE id=?', [positive.id]),
+  ).rejects.toThrow();
+  await expect(db.query('UPDATE wallets SET version=version+1 WHERE id=?', [positive.id])).rejects.toThrow();
+  await expect(
+    owner.query('UPDATE wallet_ledger SET amount=amount WHERE wallet_id=?', [positive.id]),
+  ).rejects.toThrow('append-only');
+  await expect(db.query('TRUNCATE wallet_ledger')).rejects.toThrow();
+  const c = command(positive);
+  const result = await submit(c);
+  await expect(
+    db.query("UPDATE wager_transactions SET status='PENDING',processed_at=NULL WHERE id=?", [
+      result.data.transactionId,
+    ]),
+  ).rejects.toThrow();
+  await expect(
+    db.query('UPDATE wager_transactions SET amount=11 WHERE id=?', [result.data.transactionId]),
+  ).rejects.toThrow();
+  await expect(
+    db.query(
+      "UPDATE outbox_messages SET payload=jsonb_set(payload,'{data,status}','\"FORGED\"') WHERE aggregate_id=?",
+      [result.data.transactionId],
+    ),
+  ).rejects.toThrow('immutable');
+  await integrity();
+});
+test('50 submissões concorrentes em três processos: um débito e snapshot original no replay', async () => {
+  const wallet = await open();
+  const c = command(wallet, 'BET', '25.00');
+  const results = await Promise.all(Array.from({ length: 50 }, (_, index) => submit(c, index)));
+  expect(results.every((r) => r.status === 200)).toBe(true);
+  expect(new Set(results.map((r) => r.data.transactionId)).size).toBe(1);
+  expect(results.filter((r) => !r.data.idempotentReplay)).toHaveLength(1);
+  expect((await balance(wallet)).balance.amount).toBe('75.00');
+  expect(await ledgerCount(wallet)).toBe(2);
+  await submit(command(wallet, 'WIN', '20.00'));
+  const replay = await submit(c, 2);
+  expect(replay.data.balance!.amount).toBe('75.00');
+  expect(replay.data.walletVersion).toBe(2);
+  expect((await balance(wallet)).balance.amount).toBe('95.00');
+  expect((await submit({ ...c, money: { amount: '26.00', currency: 'BRL' } })).status).toBe(409);
+  expect((await submit({ ...c, idempotencyKey: 'another-key' })).status).toBe(409);
+  await integrity();
+});
+test('apostas disputam saldo; rejeição é persistente e LOSS não cria ledger/versão', async () => {
+  const wallet = await open();
+  const bets = [command(wallet, 'BET', '80.00'), command(wallet, 'BET', '80.00')];
+  const results = await Promise.all(bets.map((c, i) => submit(c, i)));
+  expect(results.map((r) => r.status).sort()).toEqual([200, 422]);
+  expect((await balance(wallet)).balance.amount).toBe('20.00');
+  const rejectedIndex = results.findIndex((r) => r.status === 422);
+  await submit(command(wallet, 'WIN', '100.00'));
+  const replay = await submit(bets[rejectedIndex]!);
+  expect(replay.status).toBe(422);
+  expect(replay.data.balance!.amount).toBe('20.00');
+  const before = await balance(wallet);
+  const count = await ledgerCount(wallet);
+  expect((await submit(command(wallet, 'LOSS', '0.00'))).status).toBe(200);
+  expect((await balance(wallet)).version).toBe(before.version);
+  expect(await ledgerCount(wallet)).toBe(count);
+  await integrity();
+});
+test('todas as reversões, exclusividade por tipo, referências e rejeições sem efeito', async () => {
+  const w = await open();
+  const bet = command(w, 'BET', '30.00');
+  await submit(bet);
+  const refund = command(w, 'REFUND', '30.00', bet.externalTransactionId);
+  expect((await submit(refund)).status).toBe(200);
+  expect((await submit(command(w, 'REFUND', '30.00', bet.externalTransactionId))).data.failureCode).toBe(
+    'REVERSAL_ALREADY_APPLIED',
+  );
+  expect((await submit(command(w, 'ROLLBACK', '30.00', bet.externalTransactionId))).status).toBe(200);
+  expect((await submit(command(w, 'ROLLBACK', '30.00', refund.externalTransactionId))).status).toBe(200);
+  const win = command(w, 'WIN', '45.00', bet.externalTransactionId);
+  expect((await submit(win)).status).toBe(200);
+  expect((await submit(command(w, 'ROLLBACK', '45.00', win.externalTransactionId))).status).toBe(200);
+  expect((await balance(w)).balance.amount).toBe('100.00');
+  expect((await submit(command(w, 'REFUND', '29.00', bet.externalTransactionId))).data.failureCode).toBe(
+    'REFERENCE_AMOUNT_MISMATCH',
+  );
+  expect(
+    (await submit({ ...command(w, 'WIN', '10.00', bet.externalTransactionId), roundId: 'other' })).data
+      .failureCode,
+  ).toBe('REFERENCE_CONTEXT_MISMATCH');
+  expect((await submit({ ...command(w), playerId: randomUUID() })).data.failureCode).toBe('PLAYER_MISMATCH');
+  expect((await submit({ ...command(w), walletId: randomUUID() })).data.failureCode).toBe('WALLET_NOT_FOUND');
+  const low = await open('0.00');
+  const credit = command(low, 'WIN', '10.00');
+  await submit(credit);
+  await submit(command(low, 'BET', '10.00'));
+  expect(
+    (await submit(command(low, 'ROLLBACK', '10.00', credit.externalTransactionId))).data.failureCode,
+  ).toBe('REVERSAL_INSUFFICIENT_FUNDS');
+  const max = await open(`${'9'.repeat(36)}.99`);
+  expect((await submit(command(max, 'WIN', '0.01'))).data.failureCode).toBe('MONEY_LIMIT_EXCEEDED');
+  await integrity();
+});
+test('HTTP e SQS simultâneos compartilham efeito; inbox detecta envelope divergente', async () => {
+  const w = await open();
+  const c = command(w, 'BET', '15.00');
+  const worker = await start('consumer,dlq');
+  const { id, body } = await envelope(c);
+  await submit(c, 1);
+  await waitTransaction(c);
+  await eventually(
+    () =>
+      scalar(
+        'SELECT count(*)::text AS count FROM inbox_messages WHERE message_id=? AND processed_at IS NOT NULL',
+        [id],
+      ),
+    (x) => x === 1,
+  );
+  await queues.send(queues.names.input, body, w.id, randomUUID());
+  await queues.send(
+    queues.names.input,
+    JSON.stringify({
+      messageId: randomUUID(),
+      type: 'WagerTransactionRequested',
+      occurredAt: new Date().toISOString(),
+      data: c,
+    }),
+    w.id,
+    randomUUID(),
+  );
+  await queues.send(
+    queues.names.input,
+    JSON.stringify({ ...JSON.parse(body), data: { ...c, money: { amount: '16.00', currency: 'BRL' } } }),
+    w.id,
+    randomUUID(),
+  );
+  await eventually(
+    () => scalar('SELECT count(*)::text AS count FROM dead_letter_records WHERE message_id=?', [id]),
+    (x) => x === 1,
+  );
+  expect((await balance(w)).balance.amount).toBe('85.00');
+  expect(await ledgerCount(w)).toBe(2);
+  await worker.stop();
+  await integrity();
+});
+test('REFUNDs concorrentes e wallets distribuídas preservam efeitos e versões', async () => {
+  const w = await open();
+  const bet = command(w, 'BET', '30.00');
+  await submit(bet);
+  const reversals = await Promise.all([
+    submit(command(w, 'REFUND', '30.00', bet.externalTransactionId), 1),
+    submit(command(w, 'REFUND', '30.00', bet.externalTransactionId), 2),
+  ]);
+  expect(reversals.map((r) => r.status).sort()).toEqual([200, 422]);
+  expect((await balance(w)).balance.amount).toBe('100.00');
+  const wallets = await Promise.all(Array.from({ length: 12 }, () => open()));
+  expect(
+    (await Promise.all(wallets.map((wallet, i) => submit(command(wallet, 'BET', '80.00'), i)))).every(
+      (r) => r.status === 200,
+    ),
+  ).toBe(true);
+  for (const wallet of wallets) {
+    expect((await balance(wallet)).balance.amount).toBe('20.00');
+    expect((await balance(wallet)).version).toBe(2);
+  }
+  await integrity();
+});
+test('SQS confirma REFUND pendente para liberar BET posterior do mesmo grupo', async () => {
+  const w = await open();
+  const bet = command(w, 'BET', '20.00');
+  const refund = command(w, 'REFUND', '20.00', bet.externalTransactionId);
+  const workers = await start('consumer,references');
+  await envelope(refund);
+  await waitTransaction(refund, 'PENDING_REFERENCE');
+  await envelope(bet);
+  await waitTransaction(bet);
+  await waitTransaction(refund);
+  await inputDrained();
+  await workers.stop();
+  expect((await balance(w)).balance.amount).toBe('100.00');
+  expect(await ledgerCount(w)).toBe(3);
+  await integrity();
+});
+test('falha permanente de permissão é FAILED, auditada na DLQ e não pode ser reaberta', async () => {
+  const w = await open();
+  const c = command(w);
+  const { id } = await envelope(c);
+  await owner.query('REVOKE INSERT ON wallet_ledger FROM jungle_app');
+  const worker = await start('consumer,dlq');
+  try {
+    await waitTransaction(c, 'FAILED');
+    await eventually(
+      () => scalar('SELECT count(*)::text AS count FROM dead_letter_records WHERE message_id=?', [id]),
+      (x) => x === 1,
+    );
+  } finally {
+    await owner.query('GRANT INSERT ON wallet_ledger TO jungle_app');
+    await worker.stop();
+  }
+  const replay = await submit(c);
+  expect(replay.status).toBe(500);
+  expect(replay.data.status).toBe('FAILED');
+  expect((await balance(w)).balance.amount).toBe('100.00');
+  expect(await ledgerCount(w)).toBe(1);
+  await integrity();
+});
+test('crash após enviar DLQ retoma encaminhamento persistido sem mudar FAILED', async () => {
+  const w = await open();
+  const c = command(w);
+  const { id } = await envelope(c);
+  await owner.query('REVOKE INSERT ON wallet_ledger FROM jungle_app');
+  const doomed = await start('consumer', { TEST_FAULT_POINT: 'after-dlq-send', TEST_FAULT_MESSAGE_ID: id });
+  try {
+    await doomed.wait('barrier');
+    await doomed.stop('SIGKILL');
+  } finally {
+    await owner.query('GRANT INSERT ON wallet_ledger TO jungle_app');
+  }
+  const [pending] = await db.query<{ disposition: string; dead_letter_sent_at: Date | null }>(
+    'SELECT disposition,dead_letter_sent_at FROM inbox_messages WHERE message_id=?',
+    [id],
+  );
+  expect(pending!.disposition).toBe('DLQ');
+  expect(pending!.dead_letter_sent_at).toBeNull();
+  const recovered = await start('consumer,dlq');
+  await eventually(
+    () =>
+      scalar(
+        'SELECT count(*)::text AS count FROM inbox_messages WHERE message_id=? AND dead_letter_sent_at IS NOT NULL',
+        [id],
+      ),
+    (x) => x === 1,
+  );
+  await eventually(
+    () => scalar('SELECT count(*)::text AS count FROM dead_letter_records WHERE message_id=?', [id]),
+    (x) => x === 1,
+  );
+  await inputDrained();
+  await recovered.stop();
+  expect((await submit(c)).data.status).toBe('FAILED');
+  expect((await balance(w)).balance.amount).toBe('100.00');
+  await integrity();
+});
+test('referência fora de ordem persiste, não bloqueia mensagens posteriores e sobrevive a reinício', async () => {
+  const w = await open();
+  const bet = command(w, 'BET', '40.00');
+  const refund = command(w, 'REFUND', '40.00', bet.externalTransactionId);
+  const first = await submit(refund);
+  expect(first.status).toBe(202);
+  await submit(command(w, 'WIN', '5.00'));
+  const pendingReplay = await submit(refund);
+  expect(pendingReplay.data.balance!.amount).toBe('100.00');
+  let workers = await start('consumer,references');
+  await envelope(bet);
+  await waitTransaction(bet);
+  await waitTransaction(refund);
+  await workers.stop();
+  workers = await start('references');
+  const replay = await submit(refund);
+  expect(replay.status).toBe(200);
+  expect(replay.data.idempotentReplay).toBe(true);
+  expect((await balance(w)).balance.amount).toBe('105.00');
+  expect(
+    await scalar(
+      "SELECT count(*)::text AS count FROM outbox_messages WHERE aggregate_id=? AND event_type='WagerTransactionPendingReference'",
+      [first.data.transactionId],
+    ),
+  ).toBe(1);
+  await workers.stop();
+  await integrity();
+});
+test('referências terminais inválidas e TTL: rejeição auditável sem lançamento', async () => {
+  const w = await open('0.00');
+  const rejectedBet = command(w, 'BET', '1.00');
+  await submit(rejectedBet);
+  const invalid = await submit(command(w, 'REFUND', '1.00', rejectedBet.externalTransactionId));
+  expect(invalid.status).toBe(422);
+  const missing = command(w, 'ROLLBACK', '1.00', randomUUID());
+  await submit(missing);
+  const workers = await start('references', { REFERENCE_TTL_SECONDS: '0.2' });
+  await waitTransaction(missing, 'REJECTED');
+  const replay = await submit(missing);
+  expect(replay.data.failureCode).toBe('REFERENCE_NOT_FOUND');
+  expect(await ledgerCount(w)).toBe(0);
+  await workers.stop();
+  await integrity();
+});
+test('wallet bloqueada não bloqueia outras; timeout retorna 503 recuperável com mesma chave', async () => {
+  const blocked = await open();
+  const free = await open();
+  const c = command(blocked);
+  const known = command(blocked);
+  await submit(known);
+  let release!: () => void;
+  let acquired!: () => void;
+  const acquiredPromise = new Promise<void>((r) => {
+    acquired = r;
+  });
+  const held = owner.transaction(async (em) => {
+    await owner.query('SELECT id FROM wallets WHERE id=? FOR UPDATE', [blocked.id], em);
+    acquired();
+    await new Promise<void>((r) => {
+      release = r;
+    });
+  });
+  await acquiredPromise;
+  const replayStart = performance.now();
+  expect((await submit(known, 1)).data.idempotentReplay).toBe(true);
+  expect(performance.now() - replayStart).toBeLessThan(900);
+  const wait = submit(c);
+  const startTime = performance.now();
+  const other = await submit(command(free), 2);
+  expect(other.status).toBe(200);
+  expect(performance.now() - startTime).toBeLessThan(900);
+  expect((await wait).status).toBe(503);
+  release();
+  await held;
+  expect((await submit(c)).status).toBe(200);
+  expect((await balance(blocked)).balance.amount).toBe('80.00');
+  await integrity();
+}, 10000);
+test('cursor mantém limite superior durante novos movimentos; reconciliação detecta corrupção administrativa', async () => {
+  const w = await open();
+  for (let i = 0; i < 4; i++) await submit(command(w, 'WIN', '1.00'));
+  type Page = { items: { walletVersion: number }[]; nextCursor: string | null };
+  const first = await http<Page>(apis[0]!, `/wallets/${w.id}/ledger?limit=2`);
+  expect(first.data.items.map((x) => x.walletVersion)).toEqual([5, 4]);
+  await submit(command(w, 'WIN', '1.00'));
+  const second = await http<Page>(
+    apis[1]!,
+    `/wallets/${w.id}/ledger?limit=2&cursor=${first.data.nextCursor}`,
+  );
+  expect(second.data.items.map((x) => x.walletVersion)).toEqual([3, 2]);
+  expect(
+    (await http<{ consistent: boolean }>(apis[0]!, `/wallets/${w.id}/reconciliation`, {})).data.consistent,
+  ).toBe(true);
+  await owner.query('ALTER TABLE wallets DISABLE TRIGGER wallet_movement');
+  try {
+    await owner.query('UPDATE wallets SET balance=balance+1 WHERE id=?', [w.id]);
+    const check = await http<{ consistent: boolean; difference: { amount: string } }>(
+      apis[0]!,
+      `/wallets/${w.id}/reconciliation`,
+      {},
+    );
+    expect(check.data.consistent).toBe(false);
+    expect(check.data.difference.amount).toBe('1.00');
+    await owner.query('UPDATE wallets SET balance=balance-1 WHERE id=?', [w.id]);
+  } finally {
+    await owner.query('ALTER TABLE wallets ENABLE TRIGGER wallet_movement');
+  }
+  await integrity();
+});
+for (const point of ['before-commit', 'after-commit', 'before-ack'])
+  test(`morte em ${point}: redelivery mantém atomicidade e efeito único`, async () => {
+    const w = await open();
+    const c = command(w, 'BET', '25.00');
+    const { id } = await envelope(c);
+    const doomed = await start('consumer', { TEST_FAULT_POINT: point, TEST_FAULT_MESSAGE_ID: id });
+    const barrier = await doomed.wait('barrier');
+    if (point === 'before-commit') {
+      expect(
+        await scalar(
+          "SELECT count(*)::text AS count FROM outbox_messages WHERE payload->'data'->>'transactionId'=?",
+          [barrier!.transactionId],
+        ),
+      ).toBe(0);
+      expect((await balance(w)).balance.amount).toBe('100.00');
+    }
+    await doomed.stop('SIGKILL');
+    if (point === 'before-commit') {
+      expect((await balance(w)).balance.amount).toBe('100.00');
+      expect(
+        await scalar('SELECT count(*)::text AS count FROM wager_transactions WHERE idempotency_key=?', [
+          c.idempotencyKey,
+        ]),
+      ).toBe(0);
+      expect(
+        await scalar('SELECT count(*)::text AS count FROM inbox_messages WHERE message_id=?', [id]),
+      ).toBe(0);
+    } else {
+      expect((await balance(w)).balance.amount).toBe('75.00');
+    }
+    const recovered = await start('consumer');
+    await waitTransaction(c);
+    await eventually(
+      () =>
+        scalar(
+          'SELECT count(*)::text AS count FROM inbox_messages WHERE message_id=? AND processed_at IS NOT NULL',
+          [id],
+        ),
+      (x) => x === 1,
+    );
+    await inputDrained();
+    await recovered.stop();
+    expect((await balance(w)).balance.amount).toBe('75.00');
+    expect(await ledgerCount(w)).toBe(2);
+    const tx = await submit(c);
+    expect(tx.data.idempotentReplay).toBe(true);
+    await integrity();
+  });
+test('shutdown devolve visibilidade do trabalho restante e deixa a transação sem efeito', async () => {
+  const w = await open();
+  const c = command(w);
+  await envelope(c);
+  const doomed = await start('consumer', { TEST_FAULT_POINT: 'before-commit', SHUTDOWN_GRACE_MS: '200' });
+  await doomed.wait('barrier');
+  const startTime = performance.now();
+  await doomed.stop();
+  expect(performance.now() - startTime).toBeLessThan(2000);
+  const recovered = await start('consumer');
+  await waitTransaction(c);
+  await recovered.stop();
+  expect((await balance(w)).balance.amount).toBe('90.00');
+  await integrity();
+});
+test('DLQ persiste mensagens permanentes e esgotadas pelo broker antes de removê-las', async () => {
+  const worker = await start('consumer,dlq');
+  await queues.send(queues.names.input, 'invalid-json', 'invalid', randomUUID());
+  await eventually(
+    () => scalar("SELECT count(*)::text AS count FROM dead_letter_records WHERE body='invalid-json'"),
+    (x) => x === 1,
+  );
+  await worker.stop();
+  const poison = `retry-exhausted-${suffix}`;
+  await queues.send(queues.names.input, poison, 'exhaustion', randomUUID());
+  for (let i = 0; i < 6; i++) {
+    const messages = await queues.receive(queues.names.input);
+    for (const message of messages) await queues.visibility(queues.names.input, message.ReceiptHandle!, 0);
+  }
+  const audit = await start('dlq');
+  await eventually(
+    () => scalar('SELECT count(*)::text AS count FROM dead_letter_records WHERE body=?', [poison]),
+    (x) => x === 1,
+  );
+  await audit.stop();
+  await integrity();
+});
+test('dois publishers, crash após envio e lease expirada: eventId estável e confirmação protegida', async () => {
+  const doomed = await start('publisher', { TEST_FAULT_POINT: 'after-publish', WORK_LEASE_MS: '500' });
+  await doomed.wait('barrier');
+  await doomed.stop('SIGKILL');
+  const first = await start('publisher,events');
+  const second = await start('publisher');
+  await eventually(
+    () => scalar('SELECT count(*)::text AS count FROM outbox_messages WHERE published_at IS NULL'),
+    (x) => x === 0,
+    20000,
+  );
+  await eventually(
+    () => scalar('SELECT count(*)::text AS count FROM integration_event_receipts'),
+    (asyncExpected) => asyncExpected > 0,
+  );
+  const [event] = await db.query<{ id: string; wallet_id: string; payload: Record<string, unknown> }>(
+    'SELECT * FROM outbox_messages ORDER BY occurred_at LIMIT 1',
+  );
+  await queues.send(queues.names.events, JSON.stringify(event!.payload), event!.wallet_id, randomUUID());
+  await queues.send(queues.names.events, JSON.stringify(event!.payload), event!.wallet_id, randomUUID());
+  await Bun.sleep(100);
+  expect(
+    await scalar('SELECT count(*)::text AS count FROM integration_event_receipts WHERE event_id=?', [
+      event!.id,
+    ]),
+  ).toBe(1);
+  await first.stop();
+  await second.stop();
+  const w = await open();
+  const stale = await start('publisher', { TEST_FAULT_POINT: 'publisher-before-send', WORK_LEASE_MS: '300' });
+  await stale.wait('barrier');
+  await Bun.sleep(400);
+  const replacement = await start('publisher');
+  await eventually(
+    () =>
+      scalar(
+        'SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND published_at IS NULL',
+        [w.id],
+      ),
+    (x) => x === 0,
+  );
+  const snapshots = await db.query(
+    'SELECT id,published_at,attempts FROM outbox_messages WHERE wallet_id=? ORDER BY id',
+    [w.id],
+  );
+  stale.child.send({ type: 'release-fault' });
+  await Bun.sleep(100);
+  expect(
+    await db.query('SELECT id,published_at,attempts FROM outbox_messages WHERE wallet_id=? ORDER BY id', [
+      w.id,
+    ]),
+  ).toEqual(snapshots);
+  await stale.stop();
+  await replacement.stop();
+  await integrity();
+}, 30000);
+test('indisponibilidade de SQS conserva outbox e retomada publica eventos confirmados', async () => {
+  const originalEndpoint = process.env.AWS_ENDPOINT_URL;
+  process.env.AWS_ENDPOINT_URL = 'http://127.0.0.1:9';
+  const failing = await start('publisher');
+  if (originalEndpoint === undefined) delete process.env.AWS_ENDPOINT_URL;
+  else process.env.AWS_ENDPOINT_URL = originalEndpoint;
+  const w = await open();
+  await submit(command(w));
+  await eventually(
+    () =>
+      scalar(
+        'SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND attempts>0 AND published_at IS NULL',
+        [w.id],
+      ),
+    (x) => x > 0,
+  );
+  await failing.stop();
+  const recovered = await start('publisher');
+  await eventually(
+    () => scalar('SELECT count(*)::text AS count FROM outbox_messages WHERE published_at IS NULL'),
+    (x) => x === 0,
+  );
+  await recovered.stop();
+  await integrity();
+});
+async function compose(...args: string[]) {
+  const envFile = (await Bun.file('.env.local').exists()) ? ['--env-file', '.env.local'] : [];
+  const child = Bun.spawn(['docker', 'compose', ...envFile, ...args], {
+    stdout: 'ignore',
+    stderr: 'inherit',
+  });
+  if ((await child.exited) !== 0) throw new Error(`Docker Compose failed: ${args.join(' ')}`);
+}
+test.skipIf(!process.env.TEST_BROKER)(
+  'broker real parado/reiniciado: readiness, retry, persistência SQS e outbox',
+  async () => {
+    const broker = process.env.TEST_BROKER!;
+    if (!['localstack', 'ministack'].includes(broker)) throw new Error('Invalid TEST_BROKER');
+    const profile = broker === 'localstack' ? 'reference' : 'portable';
+    const w = await open();
+    const queued = command(w, 'BET', '10.00');
+    await envelope(queued);
+    await compose('--profile', profile, 'stop', broker);
+    let running: App | undefined;
+    try {
+      running = await start('api,consumer,publisher');
+      expect((await http(running, '/health/live')).status).toBe(200);
+      expect((await http(running, '/health/ready')).status).toBe(503);
+      const during = command(w, 'BET', '20.00');
+      expect((await submit(during)).status).toBe(200);
+      expect(
+        await scalar(
+          'SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND published_at IS NULL',
+          [w.id],
+        ),
+      ).toBeGreaterThan(0);
+    } finally {
+      await compose('--profile', profile, 'up', '-d', broker);
+      await eventually(
+        async () => {
+          try {
+            await queues.ready();
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        Boolean,
+        60000,
+      );
+    }
+    await waitTransaction(queued);
+    await inputDrained();
+    await eventually(
+      () => scalar('SELECT count(*)::text AS count FROM outbox_messages WHERE published_at IS NULL'),
+      (x) => x === 0,
+    );
+    expect((await balance(w)).balance.amount).toBe('70.00');
+    expect((await http(running!, '/health/ready')).status).toBe(200);
+    await running!.stop();
+    await integrity();
+  },
+  90000,
+);
+test.skipIf(!process.env.TEST_BROKER)(
+  'PostgreSQL real indisponível: 503, liveness e retry com mesma chave após reinício',
+  async () => {
+    const w = await open();
+    const c = command(w);
+    await compose('stop', 'postgres');
+    try {
+      expect((await http(apis[0]!, '/health/live')).status).toBe(200);
+      expect((await submit(c)).status).toBe(503);
+    } finally {
+      await compose('up', '-d', 'postgres');
+      await eventually(
+        async () => {
+          try {
+            await db.query('SELECT 1');
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        Boolean,
+        20000,
+      );
+    }
+    expect((await submit(c)).status).toBe(200);
+    expect((await balance(w)).balance.amount).toBe('90.00');
+    await integrity();
+  },
+  30000,
+);
