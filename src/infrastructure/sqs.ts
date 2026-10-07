@@ -140,14 +140,18 @@ export class Queues {
       { abortSignal: AbortSignal.timeout(5000) },
     );
   }
-  async visibility(name: string, receipt: string, seconds: number): Promise<void> {
+  async visibility(name: string, receipt: string, seconds: number, signal?: AbortSignal): Promise<void> {
     await this.client.send(
       new ChangeMessageVisibilityCommand({
         QueueUrl: await this.url(name),
         ReceiptHandle: receipt,
         VisibilityTimeout: seconds,
       }),
-      { abortSignal: AbortSignal.timeout(5000) },
+      {
+        abortSignal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(5000)])
+          : AbortSignal.timeout(5000),
+      },
     );
   }
   close(): void {

@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { DeleteQueueCommand, GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
+import {
+  DeleteQueueCommand,
+  GetQueueAttributesCommand,
+  SetQueueAttributesCommand,
+} from '@aws-sdk/client-sqs';
 import { Database } from '../../src/infrastructure/database.js';
 import { Queues } from '../../src/infrastructure/sqs.js';
 import type { ProcessingResult } from '../../src/application/contracts.js';
@@ -656,20 +660,80 @@ for (const point of ['before-commit', 'after-commit', 'before-ack'])
     expect(tx.data.idempotentReplay).toBe(true);
     await integrity();
   });
-test('shutdown devolve visibilidade do trabalho restante e deixa a transação sem efeito', async () => {
-  const w = await open();
-  const c = command(w);
-  await envelope(c);
-  const doomed = await start('consumer', { TEST_FAULT_POINT: 'before-commit', SHUTDOWN_GRACE_MS: '200' });
-  await doomed.wait('barrier');
-  const startTime = performance.now();
-  await doomed.stop();
-  expect(performance.now() - startTime).toBeLessThan(2000);
-  const recovered = await start('consumer');
-  await waitTransaction(c);
-  await recovered.stop();
-  expect((await balance(w)).balance.amount).toBe('90.00');
-  await integrity();
+test('shutdown no prazo devolve visibilidade imediatamente, sem aguardar expiração de 30 segundos', async () => {
+  const visibilityStarted = Promise.withResolvers<void>();
+  const allowVisibility = Promise.withResolvers<void>();
+  const upstream = new URL(queues.endpoint);
+  const proxy = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const text = await request.text();
+      const body = text ? JSON.parse(text) : {};
+      if (body.VisibilityTimeout === 0) {
+        visibilityStarted.resolve();
+        await allowVisibility.promise;
+      }
+      const destination = new URL(new URL(request.url).pathname, upstream);
+      try {
+        return await fetch(destination, {
+          method: request.method,
+          headers: request.headers,
+          body: text,
+          signal: request.signal,
+        });
+      } catch {
+        return new Response('Forwarding cancelled', { status: 503 });
+      }
+    },
+  });
+  const queueUrl = await queues.url(queues.names.input);
+  await queues.client.send(
+    new SetQueueAttributesCommand({ QueueUrl: queueUrl, Attributes: { VisibilityTimeout: '30' } }),
+  );
+  try {
+    const w = await open();
+    const c = command(w);
+    await envelope(c);
+    const doomed = await start('consumer', {
+      TEST_FAULT_POINT: 'before-commit',
+      SHUTDOWN_GRACE_MS: '200',
+      SQS_VISIBILITY_SECONDS: '30',
+      AWS_ENDPOINT_URL: proxy.url.origin,
+    });
+    await doomed.wait('barrier');
+    const startTime = performance.now();
+    const stopped = doomed.stop();
+    await Promise.race([
+      visibilityStarted.promise,
+      Bun.sleep(2000).then(() => {
+        throw new Error('Visibility return never started');
+      }),
+    ]);
+    // Delay a real SQS request past the drain deadline while preserving its network cancellation.
+    await Bun.sleep(300);
+    expect(doomed.child.exitCode).toBeNull();
+    allowVisibility.resolve();
+    await stopped;
+    expect(performance.now() - startTime).toBeLessThan(2000);
+    expect((await balance(w)).balance.amount).toBe('100.00');
+    const returned = await queues.receive(queues.names.input);
+    expect(returned).toHaveLength(1);
+    expect(JSON.parse(returned[0]!.Body!).data.externalTransactionId).toBe(c.externalTransactionId);
+    await queues.visibility(queues.names.input, returned[0]!.ReceiptHandle!, 0);
+    const recovered = await start('consumer');
+    await waitTransaction(c);
+    await inputDrained();
+    await recovered.stop();
+    expect((await balance(w)).balance.amount).toBe('90.00');
+    await integrity();
+  } finally {
+    allowVisibility.resolve();
+    await proxy.stop(true);
+    await queues.client.send(
+      new SetQueueAttributesCommand({ QueueUrl: queueUrl, Attributes: { VisibilityTimeout: '2' } }),
+    );
+  }
 });
 test('DLQ persiste mensagens permanentes e esgotadas pelo broker antes de removê-las', async () => {
   const worker = await start('consumer,dlq');
@@ -822,16 +886,18 @@ test.skipIf(!process.env.TEST_BROKER)(
     }
     await waitTransaction(queued);
     await inputDrained();
+    // Outbox retries can wait up to five minutes after a prolonged real broker outage.
     await eventually(
       () => scalar('SELECT count(*)::text AS count FROM outbox_messages WHERE published_at IS NULL'),
       (x) => x === 0,
+      330000,
     );
     expect((await balance(w)).balance.amount).toBe('70.00');
     expect((await http(running!, '/health/ready')).status).toBe(200);
     await running!.stop();
     await integrity();
   },
-  90000,
+  450000,
 );
 test.skipIf(!process.env.TEST_BROKER)(
   'PostgreSQL real indisponível: 503, liveness e retry com mesma chave após reinício',

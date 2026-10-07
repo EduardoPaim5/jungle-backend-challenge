@@ -81,8 +81,12 @@ async function shutdown(): Promise<void> {
   logger.info({ roles: [...roles] }, 'shutdown_started');
   const grace = Number(process.env.SHUTDOWN_GRACE_MS ?? 25000);
   await Promise.race([
-    Promise.allSettled([app?.close(), ...workers.map((worker) => worker.stop())]),
-    Bun.sleep(grace),
+    Promise.allSettled([
+      Promise.race([app?.close(), Bun.sleep(grace)]),
+      ...workers.map((worker) => worker.stop()),
+    ]),
+    // Keep the SQS client alive for the bounded release after financial work stops draining.
+    Bun.sleep(grace + 1500),
   ]);
   queues.close();
   await Promise.race([db.close(), Bun.sleep(1000)]);

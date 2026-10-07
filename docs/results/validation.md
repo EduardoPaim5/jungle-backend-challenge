@@ -6,11 +6,13 @@ Data: 7 de outubro de 2026. Bun 1.4.2, NestJS 12.1.2, MikroORM 7.2.4, TypeScript
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `bun run format:check`                                                  | Aprovada                                                                            |
 | `bun run typecheck`                                                     | Aprovada, modo estrito                                                              |
+| `bun audit`                                                             | Nenhuma vulnerabilidade conhecida reportada em 155 pacotes                          |
 | `bun run test`                                                          | 23 testes unitários aprovados                                                       |
 | `TEST_BROKER=localstack bun run verify`                                 | 23 unitários + 22 integrações aprovados, sem skipped                                |
 | `TEST_BROKER=ministack bun run verify`                                  | 23 unitários + 22 integrações aprovados, sem skipped                                |
 | Migrações up/down completo/up                                           | Aprovadas em bancos isolados nos dois brokers                                       |
 | Crashes, redelivery, publisher antigo e reinício real de SQS/PostgreSQL | Aprovados nos dois brokers                                                          |
+| Shutdown com devolução atrasada por barreira e visibilidade de 30 s     | Mensagem recuperada imediatamente após SIGTERM, sem esperar a expiração natural     |
 | Compose com `--scale app=3`                                             | Três containers Bun executando como usuário `bun`; setup aplicou migrations e filas |
 | Demo nas três instâncias Docker                                         | BET/replay/REFUND fora de ordem/SQS/reconciliação aprovados                         |
 | `BROKER_LABEL=LocalStack bun run test:load`                             | 6 repetições medidas, zero erros técnicos, saldos consistentes e outbox drenada     |

@@ -45,7 +45,7 @@ export abstract class LoopWorker {
   }
   async stop(): Promise<void> {
     this.stopping = true;
-    await this.task;
+    await Promise.race([this.task, Bun.sleep(Number(process.env.SHUTDOWN_GRACE_MS ?? 25000))]);
   }
 }
 interface OutboxRow {
@@ -156,7 +156,10 @@ const envelopeSchema = z.object({
 export class QueueConsumer extends LoopWorker {
   protected interval = 50;
   private abort = new AbortController();
+  private renewalAbort = new AbortController();
   private inflight = new Map<string, Message>();
+  private heartbeats = new Map<string, ReturnType<typeof setInterval>>();
+  private renewals = new Set<Promise<void>>();
   constructor(
     private db: Database,
     private queues: Queues,
@@ -176,14 +179,22 @@ export class QueueConsumer extends LoopWorker {
       this.inflight.set(receipt, message);
       const heartbeat = setInterval(
         () => {
-          void this.queues
-            .visibility(this.name, receipt, Number(process.env.SQS_VISIBILITY_SECONDS ?? 30))
+          const renewal = this.queues
+            .visibility(
+              this.name,
+              receipt,
+              Number(process.env.SQS_VISIBILITY_SECONDS ?? 30),
+              this.renewalAbort.signal,
+            )
             .catch((e) =>
               logger.warn({ messageId: message.MessageId, errorCode: code(e) }, 'visibility_renew_failed'),
             );
+          this.renewals.add(renewal);
+          void renewal.finally(() => this.renewals.delete(renewal));
         },
         Number(process.env.SQS_HEARTBEAT_MS ?? 10000),
       );
+      this.heartbeats.set(receipt, heartbeat);
       try {
         if (this.mode === 'input') await this.processInput(message);
         else if (this.mode === 'dlq') await this.auditDlq(message);
@@ -209,6 +220,7 @@ export class QueueConsumer extends LoopWorker {
           .catch(() => {});
       } finally {
         clearInterval(heartbeat);
+        this.heartbeats.delete(receipt);
         this.inflight.delete(receipt);
       }
     });
@@ -336,9 +348,14 @@ export class QueueConsumer extends LoopWorker {
   override async stop(): Promise<void> {
     this.stopping = true;
     this.abort.abort();
-    await Promise.race([super.stop(), Bun.sleep(Number(process.env.SHUTDOWN_GRACE_MS ?? 25000))]);
+    await super.stop();
+    for (const heartbeat of this.heartbeats.values()) clearInterval(heartbeat);
+    this.renewalAbort.abort();
+    await Promise.allSettled(this.renewals);
     await Promise.allSettled(
-      [...this.inflight.keys()].map((receipt) => this.queues.visibility(this.name, receipt, 0)),
+      [...this.inflight.keys()].map((receipt) =>
+        this.queues.visibility(this.name, receipt, 0, AbortSignal.timeout(1000)),
+      ),
     );
   }
 }

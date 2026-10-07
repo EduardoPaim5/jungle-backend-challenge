@@ -75,7 +75,7 @@ Outbox contém o envelope imutável criado dentro da transação financeira. Pub
 
 Publicação confirmada exige o token de posse ainda vigente e lease não expirada. Worker antigo não sobrescreve sucessor. Falhas reagendam em até 5 min; o registro confirmado permanece até envio bem-sucedido. Morte depois do envio e antes da marcação pode reenviar o evento: eventId permanece igual. FIFO dedup é uma otimização limitada no tempo. Consumidores precisam dedup persistente; o exemplo usa consumer/eventId. Eventos de saldo incluem walletVersion; múltiplos publishers podem publicar fora de ordem financeira, então consumidores de projeção devem tratar versões/gaps.
 
-SIGTERM para novas recepções, cancela long polling e aguarda até 25 s. Trabalho restante volta a ter visibilidade. Transações inacabadas são revertidas quando a conexão/processo termina; leases abandonadas expiram. Todas as garantias dependem da durabilidade do commit PostgreSQL e da confirmação durável de SQS.
+SIGTERM para novas recepções, cancela long polling e drena trabalho por até 25 s. Depois cancela as renovações de visibilidade e devolve as mensagens restantes, com deadline adicional de 1 s e o cliente SQS ainda aberto. O encerramento reserva essa etapa antes de fechar as dependências; workers de outbox/referência também têm drenagem limitada. Se SQS estiver indisponível durante a devolução, a visibilidade original expira normalmente. Transações inacabadas são revertidas quando a conexão/processo termina; leases abandonadas expiram. Todas as garantias dependem da durabilidade do commit PostgreSQL e da confirmação durável de SQS.
 
 ## Consultas e diagnóstico
 
