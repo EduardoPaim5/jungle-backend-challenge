@@ -1,6 +1,6 @@
 # Validação adversarial adicional
 
-Esta rodada acrescenta dez cenários de integração e uma prova de domínio à suíte original. A suíte completa passa a conter **24 testes unitários e 32 de integração**. Os testes continuam usando PostgreSQL e SQS reais e pelo menos três processos da aplicação.
+Esta rodada acrescenta onze cenários de integração e uma prova de domínio à suíte original. A suíte completa passa a conter **24 testes unitários e 33 de integração**. Os testes continuam usando PostgreSQL e SQS reais e pelo menos três processos da aplicação.
 
 | Cenário                        | Evidência verificada                                                                                                                                                                                                                                                           |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -13,7 +13,10 @@ Esta rodada acrescenta dez cenários de integração e uma prova de domínio à 
 | Consultas e cursor             | As duas consultas de transação preservam o resultado original. Recursos ausentes retornam 404; UUID, limites e cursor inválidos ou de outra wallet retornam 400.                                                                                                               |
 | Reconciliação concorrente      | Uma barreira separa a leitura da wallet da soma do ledger. Outra instância confirma uma BET nesse intervalo; REPEATABLE READ mantém ambas as leituras no mesmo snapshot.                                                                                                       |
 | Resposta HTTP perdida          | O processo morre depois do commit e antes da resposta. Reenviar a mesma chave em outra instância recupera a decisão original, mesmo após outra movimentação.                                                                                                                   |
+| Identidade inválida no SQS     | Envelopes com messageId contendo controles, somente espaços, tamanho excessivo ou Unicode malformado são enviados à DLQ, auditados com identidade segura do broker e confirmados, sem transação financeira ou alteração de saldo/ledger.                                       |
 | Modelo financeiro independente | 120 operações geradas com seed `0x4a554e47`, uma BET inicial e 14 replays são comparados com um oráculo de centavos em bigint, sem usar os cálculos do domínio/aplicação. Saldo, versões, cada linha do ledger, códigos de rejeição e contagens de eventos precisam coincidir. |
+
+O caso com `messageId` contendo NUL reproduziu uma falha antes da correção: o identificador inválido chegava ao PostgreSQL e também impedia a auditoria da DLQ. A validação agora ocorre antes do processamento financeiro; o auditor aceita a identidade do envelope somente quando ela é válida, conservando a identidade segura de transporte como alternativa. Os identificadores de negócio e chaves idempotentes também recusam Unicode malformado para impedir conversão silenciosa durante a persistência.
 
 O teste de domínio isola conflitos de provedor, jogador, wallet, moeda e rodada em referências. As barreiras adicionais ficam desabilitadas fora de `NODE_ENV=test` e não têm endpoints HTTP de controle.
 

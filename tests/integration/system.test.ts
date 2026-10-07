@@ -940,6 +940,8 @@ test('contratos HTTP adversariais rejeitam entradas inválidas sem persistir efe
     { ...valid, providerId: '__system__' },
     { ...valid, providerId: ' \t' },
     { ...valid, externalTransactionId: 'invalid\u0000id' },
+    { ...valid, externalTransactionId: '\ud800' },
+    { ...valid, roundId: '\udfff' },
     { ...valid, playerId: 'not-a-uuid' },
     { ...valid, walletId: 'not-a-uuid' },
     { ...valid, kind: 'REFUND' },
@@ -1400,3 +1402,42 @@ test('sequência de 120 operações com seed fixa corresponde a um modelo financ
   ).toBe(snapshots.length + 1);
   await integrity();
 }, 30000);
+
+test('messageId inválido é auditado na DLQ sem entrar no processamento financeiro', async () => {
+  const w = await open();
+  const c = command(w);
+  const worker = await start('consumer,dlq');
+  try {
+    for (const messageId of ['\u0000invalid', ' \t', 'x'.repeat(129), '\ud800', '\udfff']) {
+      const body = JSON.stringify({
+        messageId,
+        type: 'WagerTransactionRequested',
+        occurredAt: new Date().toISOString(),
+        data: c,
+      });
+      await queues.send(queues.names.input, body, w.id, randomUUID());
+      await eventually(
+        () => scalar('SELECT count(*)::text AS count FROM dead_letter_records WHERE body=?', [body]),
+        (n) => n === 1,
+      );
+      const [record] = await db.query<{ reason: string; message_id: string }>(
+        'SELECT reason,message_id FROM dead_letter_records WHERE body=?',
+        [body],
+      );
+      expect(record!.reason).toBe('INVALID_ENVELOPE');
+      expect(record!.message_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(record!.message_id).not.toBe(messageId);
+    }
+    expect(
+      await scalar('SELECT count(*)::text AS count FROM wager_transactions WHERE idempotency_key=?', [
+        c.idempotencyKey,
+      ]),
+    ).toBe(0);
+    expect((await balance(w)).balance.amount).toBe('100.00');
+    expect(await ledgerCount(w)).toBe(1);
+    await inputDrained();
+  } finally {
+    await worker.stop();
+  }
+  await integrity();
+});

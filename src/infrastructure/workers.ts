@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Message } from '@aws-sdk/client-sqs';
 import { Wagering, commandFromRow, transient, type TransactionRow } from '../application/wagering.js';
-import { ServiceError, hash, parseCommand, type ProcessingContext } from '../application/contracts.js';
+import {
+  ServiceError,
+  hash,
+  isPersistableIdentifier,
+  parseCommand,
+  type ProcessingContext,
+} from '../application/contracts.js';
 import { Database, sqlState } from './database.js';
 import { Queues } from './sqs.js';
 import { Observability, logger } from './observability.js';
@@ -148,8 +154,9 @@ export class ReferenceWorker extends LoopWorker {
     });
   }
 }
+const messageIdSchema = z.string().min(1).max(128).refine(isPersistableIdentifier);
 const envelopeSchema = z.object({
-  messageId: z.string().min(1).max(128),
+  messageId: messageIdSchema,
   type: z.literal('WagerTransactionRequested'),
   occurredAt: z.iso.datetime(),
   data: z.record(z.string(), z.unknown()),
@@ -311,10 +318,12 @@ export class QueueConsumer extends LoopWorker {
       );
   }
   private async auditDlq(message: Message): Promise<void> {
-    let id = message.MessageAttributes?.SourceMessageId?.StringValue ?? message.MessageId!;
+    const sourceId = messageIdSchema.safeParse(message.MessageAttributes?.SourceMessageId?.StringValue);
+    let id = sourceId.success ? sourceId.data : message.MessageId!;
     try {
       const json = JSON.parse(message.Body ?? '');
-      if (typeof json.messageId === 'string') id = json.messageId;
+      const envelopeId = messageIdSchema.safeParse(json.messageId);
+      if (envelopeId.success) id = envelopeId.data;
     } catch {}
     const inserted = await this.db.query(
       `INSERT INTO dead_letter_records(id,message_id,payload_hash,body,reason) VALUES (?,?,?,?,?)

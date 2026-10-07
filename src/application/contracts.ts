@@ -5,11 +5,14 @@ import { DomainError } from '../domain/errors.js';
 import type { WagerCommand, TransactionStatus } from '../domain/transaction.js';
 import type { MoneyProps } from '../domain/money.js';
 
-const identifier = z
-  .string()
-  .min(1)
-  .max(128)
-  .refine((x) => x.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(x));
+export function isPersistableIdentifier(value: string): boolean {
+  return (
+    value.trim().length > 0 &&
+    !/[\u0000-\u001f\u007f]/.test(value) &&
+    Buffer.from(value, 'utf8').toString('utf8') === value
+  );
+}
+const identifier = z.string().min(1).max(128).refine(isPersistableIdentifier);
 const moneySchema = z.object({ amount: z.string().max(128), currency: z.string().regex(/^[A-Z]{3}$/) });
 export const walletInput = z.object({ playerId: z.uuid(), initialBalance: moneySchema });
 const wageringInput = z
@@ -57,13 +60,7 @@ export class ServiceError extends Error {
 }
 export function parseCommand(body: unknown, key: unknown): WagerCommand {
   const p = wageringInput.safeParse(body);
-  if (
-    !p.success ||
-    typeof key !== 'string' ||
-    !key.trim() ||
-    key.length > 256 ||
-    /[\u0000-\u001f\u007f]/.test(key)
-  )
+  if (!p.success || typeof key !== 'string' || key.length > 256 || !isPersistableIdentifier(key))
     throw new ServiceError('INVALID_REQUEST', 400);
   const money = normalizeMoney(p.data.money);
   return {
