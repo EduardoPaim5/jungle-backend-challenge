@@ -1,0 +1,38 @@
+# Matriz de requisitos e evidências
+
+Referência: [README oficial](https://github.com/junglegaming/backend-challenge/blob/c7143e6d041585d6913f56eb7415105e074f83dc/README.md), avaliação de 100 pontos. A pontuação final pertence aos avaliadores; esta matriz apresenta as evidências para cada área.
+
+| Critério                     | Implementação                                                                                                                                     | Prova reproduzível                                                                                                                                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Correção financeira — 20     | `src/domain/money.ts`, wallet, ledger, transaction; `application/wagering.ts`; duas migrations                                                    | Unidade: dinheiro além de precisão number, formatos, moedas, overflow, estados. Integração: abertura, BET/WIN/LOSS, REFUND e todos os ROLLBACKs, reversão sem saldo, referências, reconciliação                                 |
+| Concorrência — 20            | FOR UPDATE por wallet, READ COMMITTED, únicos, contextos exclusivos, retry                                                                        | 50 envios/3 processos; duas BETs de 80/saldo100; REFUNDs concorrentes; 12 wallets paralelas; wallet bloqueada libera outra; checks SQL de saldo/ledger/versão                                                                   |
+| Idempotência — 15            | Hash canônico, unique global/chave externa, snapshots persistentes, inbox                                                                         | Replay em outro processo e após movimentações; conflitos de chave e nova chave/mesma identidade; HTTP+SQS; envelope divergente; replay pendente e rejeitado                                                                     |
+| Mensageria e falhas — 15     | `infrastructure/workers.ts`, `sqs.ts`, outbox/inbox/leases/DLQ                                                                                    | SIGKILL antes/depois do commit/antes do ack/depois do envio; dois publishers; lease vencida/worker antigo; referência SQS antes de BET; falha permanente de permissão; redrive; DLQ; shutdown; brokers e PG parados/reiniciados |
+| Modelagem e arquitetura — 10 | Classes Money/Wallet/WagerTransaction/WalletLedgerEntry/InboxMessage/OutboxMessage, eventos abstrato/concretos, IdentityPort, módulos/adaptadores | Testes de domínio e integração; factories/reidratação; metadados Nest compilados; decisões e limites em ARCHITECTURE                                                                                                            |
+| Testes — 10                  | Bun runner, PostgreSQL/SQS reais, bancos/filas isolados, IPC de falha só NODE_ENV=test                                                            | `bun run test`; `TEST_BROKER=localstack bun run verify`; mesma suíte em MiniStack; CI nos dois ambientes                                                                                                                        |
+| Observabilidade — 5          | Pino JSON, Prometheus, health live/ready, reconciliação                                                                                           | Endpoints reais, readiness durante outage, divergência administrativa detectada, métricas de locks/retries/outbox no benchmark                                                                                                  |
+| Documentação — 5             | README, ARCHITECTURE, matriz, entrega/apresentação, resultados                                                                                    | Setup local/Compose3, demo, exemplos HTTP/SQS, parâmetros, limitações, relatório de execução                                                                                                                                    |
+| Diferencial: carga           | `scripts/load.ts`                                                                                                                                 | 3 processos, concentrada/distribuída, warmup, 3 repetições, RPS/percentis/rejeições/erros/locks/lag/reconciliação/drenagem                                                                                                      |
+
+## Invariantes verificadas diretamente
+
+Ao final dos cenários e na limpeza: saldo armazenado igual à soma assinada do ledger; saldo não negativo; versão igual ao último lançamento (ou 1 quando vazia); cadeia de saldos/versões contínua; operação financeira processada possui exatamente um ledger; LOSS/rejeições/falhas não possuem ledger. Cenários dedicados conferem inbox, unicidade de decisão, outbox, eventos pendentes e recibos.
+
+Migrations são revertidas completamente e reaplicadas. Ataques SQL tentam saldo negativo/NaN, movimento sem ledger, versão sem movimento, edição do ledger mesmo pelo owner, TRUNCATE pelo app, reabertura terminal, comando modificado e envelope de outbox modificado. Todas as alterações devem falhar. Uma fixture owner desabilita temporariamente o trigger de wallet para comprovar detecção de corrupção, restaura os dados e reabilita-o em finally.
+
+## Falhas eliminatórias
+
+| Falha                                 | Proteção                                                                      |
+| ------------------------------------- | ----------------------------------------------------------------------------- |
+| number para dinheiro                  | bigint no domínio; strings no contrato/ORM; NUMERIC SQL                       |
+| saldo negativo por race               | Lock por wallet, checagem antes do débito, constraint saldo >=0               |
+| efeito financeiro duplicado           | Uniques persistentes, decisão/ledger/saldo atômicos, corrida de 50 e HTTP/SQS |
+| idempotência em memória               | Chave/payload/snapshot no PostgreSQL; processos independentes                 |
+| funciona só em uma instância          | Todas as integrações mantêm 3 APIs reais e workers adicionais                 |
+| evento antes do commit                | Outbox na mesma transação; publisher lê apenas registros confirmados          |
+| ausência de ledger auditável          | Append-only, aritmética, continuidade e grants/triggers                       |
+| PostgreSQL/SQS substituídos por mocks | Containers reais em integração/carga/CI                                       |
+
+## Localizar os testes
+
+Todos os cenários de sistema estão em `tests/integration/system.test.ts`, com nomes descritivos correspondentes à matriz. Unidade em `tests/unit/domain.test.ts`. Os dois testes de reinício de containers usam `TEST_BROKER`; ausência da variável aparece como skipped, nunca como prova executada. Resultados registrados em [results/README.md](results/README.md).
