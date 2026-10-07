@@ -1,0 +1,2 @@
+CREATE ROLE jungle_app LOGIN PASSWORD 'jungle_app';
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;

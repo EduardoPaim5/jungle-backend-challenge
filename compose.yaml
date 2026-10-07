@@ -1,0 +1,66 @@
+name: jungle-wagering
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_USER: jungle_owner
+      POSTGRES_PASSWORD: jungle_owner
+      POSTGRES_DB: jungle
+    ports: ['127.0.0.1:55432:5432']
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/01-app-role.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U jungle_owner -d jungle']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  ministack:
+    profiles: ['portable']
+    stop_grace_period: 30s
+    image: ministackorg/ministack:1.5.22@sha256:0e51461e29524b884306810ce05c8a2e47f90f0c4dddc5a5f52166d2b56c7818
+    ports: ['127.0.0.1:4566:4566']
+    environment:
+      PERSIST_STATE: '1'
+      STATE_DIR: /data/state
+    volumes: ['ministack-data:/data']
+  localstack:
+    profiles: ['reference']
+    stop_grace_period: 30s
+    image: localstack/localstack:2026.09.1@sha256:0c644ede65c2d0c95737e09a39007828bd381bdb07ca8200c6bf17d66a4ed191
+    ports: ['127.0.0.1:4566:4566']
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+      SERVICES: sqs
+      PERSISTENCE: '1'
+      SNAPSHOT_SAVE_STRATEGY: ON_SHUTDOWN
+      SNAPSHOT_LOAD_STRATEGY: ON_STARTUP
+      SQS_ENDPOINT_STRATEGY: path
+    volumes: ['localstack-data:/var/lib/localstack']
+  setup:
+    profiles: ['application']
+    build: .
+    environment:
+      DATABASE_URL: postgresql://jungle_owner:jungle_owner@postgres:5432/jungle
+      MIGRATION_DATABASE_URL: postgresql://jungle_owner:jungle_owner@postgres:5432/jungle
+      AWS_ENDPOINT_URL: http://${BROKER_HOST:-ministack}:4566
+      AWS_REGION: us-east-1
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: ['sh', '-c', 'bun scripts/migrate.ts up && bun scripts/queues.ts']
+  app:
+    profiles: ['application']
+    build: .
+    environment:
+      DATABASE_URL: postgresql://jungle_app:jungle_app@postgres:5432/jungle
+      AWS_ENDPOINT_URL: http://${BROKER_HOST:-ministack}:4566
+      AUTH_MODE: development
+      APP_ROLES: api,consumer,references,publisher,dlq
+    depends_on:
+      setup: { condition: service_completed_successfully }
+    ports: ['127.0.0.1::3000']
+    stop_grace_period: 30s
+volumes:
+  postgres-data:
+  ministack-data:
+  localstack-data:
