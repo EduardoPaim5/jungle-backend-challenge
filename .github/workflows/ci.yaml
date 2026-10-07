@@ -1,0 +1,49 @@
+name: Financial consistency
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TEST_BROKER: ministack
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - run: docker compose --profile portable up -d --wait postgres ministack
+      - run: bun run verify
+      - if: failure()
+        run: docker compose --profile portable logs --tail 100
+      - if: always()
+        run: docker compose --profile portable down -v
+  localstack:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TEST_BROKER: localstack
+      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - name: Validate secret
+        run: test -n "$LOCALSTACK_AUTH_TOKEN" || { echo 'Configure repository secret LOCALSTACK_AUTH_TOKEN'; exit 1; }
+      - run: docker compose --profile reference up -d --wait postgres localstack
+      - run: bun run verify
+      - if: failure()
+        run: docker compose --profile reference logs --tail 100
+      - if: always()
+        run: docker compose --profile reference down -v
