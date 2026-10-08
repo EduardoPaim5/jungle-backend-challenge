@@ -60,6 +60,8 @@ A consequência dessa interpretação é explícita: saldo 100.00 → BET 30.00 
 
 PENDING transiciona para PROCESSED, PENDING_REFERENCE, REJECTED ou FAILED. PENDING_REFERENCE pode continuar pendente ou terminar; terminações não reabrem. Reidratação reconstrói o estado existente e não reaplica regras de criação.
 
+A [taxonomia de falhas](docs/FAILURE_CODES.md) especifica os códigos estáveis, diferencia rejeição persistida de erro de contrato/transporte e orienta a decisão do cliente sobre retry.
+
 ## Commit, concorrência e schema
 
 Usamos READ COMMITTED e FOR UPDATE por wallet. Ordem: **wallet → inbox → transação**. Uma tentativa recebe um EntityManager exclusivo. Lock timeout 1 s, statement timeout 5 s e até três tentativas com backoff/jitter. Uma wallet bloqueada não serializa as outras. Referências são lidas sem lock de outra wallet; uma referência financeiramente válida necessariamente pertence à wallet já bloqueada. Estados terminais são imutáveis.
@@ -144,4 +146,4 @@ O benchmark local mede três processos e duas distribuições de wallet, com aqu
 | Identidade e observabilidade           | [Guard/API](src/http/api.ts), [métricas/logs](src/infrastructure/observability.ts), [runtime](src/main.ts)                          | Guard restritivo real, health durante indisponibilidade, divergências e métricas no teste de carga                |
 | Persistência do broker e ambiente novo | [Isolated verify](scripts/isolated-verify.ts), [Recovery check](scripts/recovery-check.ts)                                          | `test:isolated` e `test:recovery` nos dois brokers, com relatórios e limpeza dos recursos exclusivos              |
 
-A suíte completa contém 25 testes unitários e 42 de integração; `test:recovery` acrescenta cinco ciclos por broker fora dessa contagem. Os testes de reinício da integração só executam com `TEST_BROKER` configurado; `test:isolated` define essa variável e direciona os reinícios ao projeto exclusivo. Comandos completos estão no [README](README.md#testes-e-verificação); a [CI por commit](https://github.com/EduardoPaim5/jungle-backend-challenge/actions) e os relatórios indicam o que efetivamente foi executado. Nenhuma dessas provas cobre todas as combinações possíveis de falhas ou substitui a qualificação de um ambiente de produção.
+A suíte completa contém 28 testes unitários e 42 de integração; `test:recovery` acrescenta cinco ciclos por broker fora dessa contagem. Os testes de reinício da integração só executam com `TEST_BROKER` configurado; `test:isolated` define essa variável e direciona os reinícios ao projeto exclusivo. Comandos completos estão no [README](README.md#testes-e-verificação); a [CI por commit](https://github.com/EduardoPaim5/jungle-backend-challenge/actions) e os relatórios indicam o que efetivamente foi executado. Nenhuma dessas provas cobre todas as combinações possíveis de falhas ou substitui a qualificação de um ambiente de produção.

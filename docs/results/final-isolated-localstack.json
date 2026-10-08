@@ -1,0 +1,8 @@
+{
+  "recordedAt": "2026-10-08T21:54:04.650Z",
+  "project": "jungle-verify-ee90c79a",
+  "broker": "localstack",
+  "methodology": "Entire verification suite against a fresh Compose project with isolated PostgreSQL/SQS volumes and fixed loopback ports. Real restart tests target this project through COMPOSE_FILE and COMPOSE_PROJECT_NAME. All owned containers and volumes are removed in finally.",
+  "success": true,
+  "seconds": 100.45038989199999
+}

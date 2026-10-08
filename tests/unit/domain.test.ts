@@ -7,9 +7,14 @@ import { InboxMessage, OutboxMessage } from '../../src/domain/messaging.js';
 import { WagerTransactionProcessed } from '../../src/domain/events.js';
 import { businessHash, parseCommand } from '../../src/application/contracts.js';
 const money = (amount: string, currency = 'BRL') => Money.from({ amount, currency });
-function transaction(kind: TransactionState['kind'] = 'BET', reference?: string) {
+function transaction(
+  kind: TransactionState['kind'] = 'BET',
+  reference?: string,
+  id = 'tx',
+  amount = '10.00',
+) {
   return WagerTransaction.create({
-    id: 'tx',
+    id,
     providerId: 'provider',
     externalTransactionId: 'external',
     idempotencyKey: 'key',
@@ -19,7 +24,7 @@ function transaction(kind: TransactionState['kind'] = 'BET', reference?: string)
     roundId: 'round',
     gameId: 'game',
     kind,
-    money: money('10.00'),
+    money: money(amount),
     referenceExternalTransactionId: reference,
     createdAt: new Date(),
   });
@@ -100,6 +105,110 @@ describe('Wallet e ledger', () => {
   });
 });
 describe('transições e referências', () => {
+  test('BET debita, WIN credita e LOSS registra resultado sem movimento financeiro', () => {
+    const wallet = Wallet.open({ id: 'wallet', playerId: 'player', initialBalance: money('100.00') });
+    const at = new Date('2026-10-08T12:00:00.000Z');
+    const bet = transaction('BET', undefined, 'bet');
+    expect(bet.affectsBalance()).toBe(true);
+    expect(bet.requiresReference()).toBe(false);
+    expect(bet.ledgerDirectionFor()).toBe('DEBIT');
+    wallet.debit(bet.money, 'INSUFFICIENT_FUNDS', at);
+    bet.markProcessed(undefined, at);
+    expect(wallet.balance.toJSON().amount).toBe('90.00');
+    expect(wallet.version).toBe(2);
+    expect(bet.status).toBe('PROCESSED');
+
+    const win = transaction('WIN', undefined, 'win', '25.00');
+    expect(win.affectsBalance()).toBe(true);
+    expect(win.requiresReference()).toBe(false);
+    expect(win.ledgerDirectionFor()).toBe('CREDIT');
+    wallet.credit(win.money, at);
+    win.markProcessed(undefined, at);
+    expect(wallet.balance.toJSON().amount).toBe('115.00');
+    expect(wallet.version).toBe(3);
+
+    for (const amount of ['0.00', '10.00']) {
+      const loss = transaction('LOSS', undefined, `loss-${amount}`, amount);
+      expect(loss.affectsBalance()).toBe(false);
+      expect(loss.requiresReference()).toBe(false);
+      expect(() => loss.ledgerDirectionFor()).toThrow('NO_LEDGER_FOR_LOSS');
+      loss.markProcessed(undefined, at);
+      expect(loss.status).toBe('PROCESSED');
+      expect(wallet.balance.toJSON().amount).toBe('115.00');
+      expect(wallet.version).toBe(3);
+    }
+    for (const kind of ['BET', 'LOSS'] as const)
+      expect(() => transaction(kind, 'forbidden-reference')).toThrow('REFERENCE_NOT_ALLOWED');
+  });
+  test('REFUND devolve a BET integral e recusa referência incompatível, parcial ou rejeitada', () => {
+    const wallet = Wallet.open({ id: 'wallet', playerId: 'player', initialBalance: money('100.00') });
+    const at = new Date('2026-10-08T12:00:00.000Z');
+    const bet = transaction('BET', undefined, 'bet');
+    wallet.debit(bet.money, 'INSUFFICIENT_FUNDS', at);
+    bet.markProcessed(undefined, at);
+    const refund = transaction('REFUND', 'external', 'refund');
+    expect(refund.requiresReference()).toBe(true);
+    expect(() => refund.validateReference(bet)).not.toThrow();
+    expect(refund.ledgerDirectionFor(bet)).toBe('CREDIT');
+    wallet.credit(refund.money, at);
+    refund.markProcessed(bet.id, at);
+    expect(wallet.balance.toJSON().amount).toBe('100.00');
+    expect(wallet.version).toBe(3);
+    expect(refund.referenceTransactionId).toBe(bet.id);
+    expect(bet.status).toBe('PROCESSED');
+    expect(() => transaction('REFUND')).toThrow('REFERENCE_REQUIRED');
+    expect(() => transaction('REFUND', 'external', 'partial', '9.99').validateReference(bet)).toThrow(
+      'REFERENCE_AMOUNT_MISMATCH',
+    );
+    const win = transaction('WIN', undefined, 'win');
+    win.markProcessed(undefined, at);
+    expect(() => refund.validateReference(win)).toThrow('INVALID_REFERENCE_KIND');
+    const rejected = transaction('BET', undefined, 'rejected-bet');
+    rejected.reject('INSUFFICIENT_FUNDS');
+    expect(() => transaction('REFUND', 'external', 'rejected-refund').validateReference(rejected)).toThrow(
+      'REFERENCE_NOT_PROCESSED',
+    );
+    expect(wallet.balance.toJSON().amount).toBe('100.00');
+    expect(wallet.version).toBe(3);
+  });
+  test('ROLLBACK inverte BET, WIN e REFUND; débito sem saldo conserva wallet e código distinto', () => {
+    const at = new Date('2026-10-08T12:00:00.000Z');
+    for (const kind of ['BET', 'WIN', 'REFUND'] as const) {
+      const wallet = Wallet.open({ id: 'wallet', playerId: 'player', initialBalance: money('50.00') });
+      const reference = transaction(
+        kind,
+        kind === 'REFUND' ? 'original-bet' : undefined,
+        `reference-${kind}`,
+      );
+      if (kind === 'BET') wallet.debit(reference.money, 'INSUFFICIENT_FUNDS', at);
+      else wallet.credit(reference.money, at);
+      reference.markProcessed(kind === 'REFUND' ? 'original-bet-id' : undefined, at);
+      const rollback = transaction('ROLLBACK', 'external', `rollback-${kind}`);
+      expect(rollback.requiresReference()).toBe(true);
+      expect(() => rollback.validateReference(reference)).not.toThrow();
+      expect(rollback.ledgerDirectionFor(reference)).toBe(kind === 'BET' ? 'CREDIT' : 'DEBIT');
+      if (kind === 'BET') wallet.credit(rollback.money, at);
+      else wallet.debit(rollback.money, 'REVERSAL_INSUFFICIENT_FUNDS', at);
+      rollback.markProcessed(reference.id, at);
+      expect(wallet.balance.toJSON().amount).toBe('50.00');
+      expect(wallet.version).toBe(3);
+      expect(rollback.referenceTransactionId).toBe(reference.id);
+      expect(reference.status).toBe('PROCESSED');
+    }
+    const wallet = Wallet.open({ id: 'wallet', playerId: 'player', initialBalance: money('10.00') });
+    wallet.debit(money('10.00'), 'INSUFFICIENT_FUNDS', at);
+    expect(() => wallet.debit(money('10.00'), 'REVERSAL_INSUFFICIENT_FUNDS', at)).toThrow(
+      'REVERSAL_INSUFFICIENT_FUNDS',
+    );
+    expect(wallet.balance.toJSON().amount).toBe('0.00');
+    expect(wallet.version).toBe(2);
+    expect(() => transaction('ROLLBACK')).toThrow('REFERENCE_REQUIRED');
+    const loss = transaction('LOSS', undefined, 'loss');
+    loss.markProcessed(undefined, at);
+    expect(() => transaction('ROLLBACK', 'external', 'rollback-loss').validateReference(loss)).toThrow(
+      'INVALID_REFERENCE_KIND',
+    );
+  });
   for (const terminal of ['processed', 'rejected', 'failed'] as const)
     test(`estado ${terminal} não reabre`, () => {
       const tx = transaction();

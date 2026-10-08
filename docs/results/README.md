@@ -2,7 +2,9 @@
 
 As evidências são de execução local, com versões fixadas pelo repositório. Não constituem previsão de pontuação ou capacidade de produção.
 
-A [validação adicional](additional-validation.md) registra três seeds do oráculo financeiro, operações mistas concorrentes por HTTP/SQS, novos limites de contrato, verificação completa em containers novos e cinco reinícios de persistência em cada broker. A suíte atual contém 25 testes unitários e 42 de integração; `test:recovery` é uma prova adicional na CI.
+A [validação final para entrega](final-submission.md) reconfirma o enunciado, completa a taxonomia de falhas e os testes unitários das cinco operações, registra 70 testes em cada broker, dez reinícios adicionais e a demonstração Docker seguida de carga em ambiente novo. Os relatórios anteriores permanecem disponíveis.
+
+A [validação adicional](additional-validation.md) registra três seeds do oráculo financeiro, operações mistas concorrentes por HTTP/SQS, novos limites de contrato, verificação completa em containers novos e cinco reinícios de persistência em cada broker. A suíte atual contém 28 testes unitários e 42 de integração; `test:recovery` é uma prova adicional na CI.
 
 A [revisão pré-entrega de 8 de outubro](pre-delivery.md) registra as correções de limites das consultas, instalação em checkout limpo, execução com três containers e revisão de consistência/credenciais. Inclui também o incidente local de snapshots e sua revalidação, com os limites da conclusão explícitos.
 

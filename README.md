@@ -130,7 +130,7 @@ TEST_BROKER=ministack bun run test:isolated
 
 O primeiro comando usa LocalStack e exige o token configurado; o segundo usa MiniStack. O script cria um projeto Compose exclusivo com portas de loopback próprias, executa `verify` incluindo os reinícios reais e remove seus containers e volumes ao concluir ou falhar. Cada integração continua criando seu banco e filas exclusivos. Esses comandos exigem Docker Compose 2.24.4 ou mais recente, com [suporte a `!override`](https://docs.docker.com/reference/compose-file/merge/#replace-value).
 
-Cada execução completa verifica formatação, tipos, build, **25 testes unitários e 42 de integração**, sem cenários skipped. O esperado é zero falhas e `success: true` no relatório final, gravado em `artifacts/jungle-verify-*/report.json`. Para verificar também as dependências instaladas, execute `bun audit`.
+Cada execução completa verifica formatação, tipos, build, **28 testes unitários e 42 de integração**, sem cenários skipped. O esperado é zero falhas e `success: true` no relatório final, gravado em `artifacts/jungle-verify-*/report.json`. Para verificar também as dependências instaladas, execute `bun audit`.
 
 A prova adicional de persistência repete cinco reinícios graciosos em um broker isolado, verificando entrada, eventos e DLQ, mensagens recebidas sem ack e long polling ativo durante o encerramento:
 
@@ -192,6 +192,8 @@ Estados terminais: `PROCESSED`, `REJECTED`, `FAILED`. Uma referência ausente pr
 | 503             | Dependência indisponível ou resultado inconclusivo; **reenviar a mesma chave e o mesmo payload** |
 
 503 não prova que o commit deixou de acontecer. Reusar a chave permite recuperar a decisão persistida. `X-Correlation-Id` válido é propagado; na ausência dele, a aplicação gera um UUID.
+
+A [taxonomia de códigos de falha](docs/FAILURE_CODES.md) documenta cada rejeição financeira, os erros de contrato/transporte e a ação esperada do cliente, incluindo quando consultar, corrigir ou reenviar com a mesma chave.
 
 ## SQS, outbox e operação
 
