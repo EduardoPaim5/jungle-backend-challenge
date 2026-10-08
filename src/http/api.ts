@@ -7,16 +7,21 @@ import {
   HttpCode,
   HttpException,
   Inject,
+  Injectable,
   Module,
   Param,
   Post,
   Query,
   Req,
   Res,
+  SetMetadata,
   type ArgumentsHost,
+  type CanActivate,
   type DynamicModule,
+  type ExecutionContext,
   type ExceptionFilter,
 } from '@nestjs/common';
+import { APP_GUARD, Reflector } from '@nestjs/core';
 import { ApiHeader, ApiOperation, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { Wagering, transient } from '../application/wagering.js';
@@ -64,6 +69,22 @@ export class DevelopmentIdentity extends IdentityPort {
     return { subject: 'local-development', mode: 'development' };
   }
 }
+const PUBLIC_ENDPOINT = 'jungle:public-endpoint';
+@Injectable()
+export class IdentityGuard implements CanActivate {
+  constructor(
+    @Inject(IdentityPort) private readonly identity: IdentityPort,
+    private readonly reflector: Reflector,
+  ) {}
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    if (
+      this.reflector.getAllAndOverride<boolean>(PUBLIC_ENDPOINT, [context.getHandler(), context.getClass()])
+    )
+      return true;
+    await this.identity.identify(context.switchToHttp().getRequest<FastifyRequest>());
+    return true;
+  }
+}
 
 @Controller()
 @ApiTags('Wagering')
@@ -74,7 +95,6 @@ export class ApiController {
     private readonly db: Database,
     private readonly queues: Queues,
     private readonly metrics: Observability,
-    @Inject(IdentityPort) private readonly identity: IdentityPort,
   ) {}
 
   @Post('wallets')
@@ -82,7 +102,6 @@ export class ApiController {
   @ApiResponse({ status: 201, description: 'Wallet criada com versão inicial 1.' })
   @ApiResponse({ status: 409, description: 'Já existe uma wallet para jogador/moeda.' })
   async createWallet(@Body() body: WalletInputDto, @Req() req: FastifyRequest) {
-    await this.identity.identify(req);
     return this.wagering.openWallet(body, correlation(req));
   }
   @Get('wallets/:walletId')
@@ -120,7 +139,6 @@ export class ApiController {
     @Req() req: FastifyRequest,
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    await this.identity.identify(req);
     const result = await this.wagering.process(parseCommand(body, key), {
       source: 'http',
       correlationId: correlation(req),
@@ -134,10 +152,12 @@ export class ApiController {
     return this.queries.reconciliation(id, correlation(req));
   }
   @Get('health/live')
+  @SetMetadata(PUBLIC_ENDPOINT, true)
   live() {
     return { status: 'ok', authMode: process.env.AUTH_MODE ?? 'development' };
   }
   @Get('health/ready')
+  @SetMetadata(PUBLIC_ENDPOINT, true)
   async ready() {
     try {
       await Promise.all([this.db.query('SELECT 1'), this.queues.ready()]);
@@ -197,7 +217,13 @@ export class ApiErrorFilter implements ExceptionFilter {
 }
 @Module({})
 export class ApiModule {
-  static configure(db: Database, queues: Queues, metrics: Observability, wagering: Wagering): DynamicModule {
+  static configure(
+    db: Database,
+    queues: Queues,
+    metrics: Observability,
+    wagering: Wagering,
+    identity: IdentityPort = new DevelopmentIdentity(),
+  ): DynamicModule {
     return {
       module: ApiModule,
       controllers: [ApiController],
@@ -207,7 +233,8 @@ export class ApiModule {
         { provide: Observability, useValue: metrics },
         { provide: Wagering, useValue: wagering },
         { provide: Queries, useValue: new Queries(db, metrics) },
-        { provide: IdentityPort, useClass: DevelopmentIdentity },
+        { provide: IdentityPort, useValue: identity },
+        { provide: APP_GUARD, useClass: IdentityGuard },
       ],
     };
   }

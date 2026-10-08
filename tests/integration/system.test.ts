@@ -9,6 +9,7 @@ import { Database } from '../../src/infrastructure/database.js';
 import { Queues } from '../../src/infrastructure/sqs.js';
 import type { ProcessingResult } from '../../src/application/contracts.js';
 import type { WagerCommand } from '../../src/domain/transaction.js';
+import type { IdentityPort } from '../../src/http/api.js';
 
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const rootUrl =
@@ -1438,6 +1439,108 @@ test('messageId inválido é auditado na DLQ sem entrar no processamento finance
     await inputDrained();
   } finally {
     await worker.stop();
+  }
+  await integrity();
+});
+
+test('guard global consulta identidade em todas as rotas de negócio e métricas; health permanece público', async () => {
+  const { NestFactory } = await import('@nestjs/core');
+  const { UnauthorizedException } = await import('@nestjs/common');
+  const { FastifyAdapter } = await import('@nestjs/platform-fastify');
+  const apiPath = new URL('../../dist/src/http/api.js', import.meta.url).href;
+  const { ApiModule, ApiErrorFilter } = (await import(apiPath)) as typeof import('../../src/http/api.js');
+  const { Observability } = (await import(
+    new URL('../../dist/src/infrastructure/observability.js', import.meta.url).href
+  )) as typeof import('../../src/infrastructure/observability.js');
+  const { Wagering } = (await import(
+    new URL('../../dist/src/application/wagering.js', import.meta.url).href
+  )) as typeof import('../../src/application/wagering.js');
+  const { Database: GuardDatabase } = (await import(
+    new URL('../../dist/src/infrastructure/database.js', import.meta.url).href
+  )) as typeof import('../../src/infrastructure/database.js');
+  const guardDb = await GuardDatabase.connect(appUrl.toString());
+  const metrics = new Observability();
+  const calls: string[] = [];
+  const identity: IdentityPort = {
+    async identify(req) {
+      calls.push(`${req.method} ${req.url}`);
+      if (req.headers.authorization !== 'Bearer test-only') throw new UnauthorizedException();
+      return { subject: 'test-principal', mode: 'test' };
+    },
+  };
+  const server = await NestFactory.create<import('@nestjs/platform-fastify').NestFastifyApplication>(
+    ApiModule.configure(guardDb, queues, metrics, new Wagering(guardDb, metrics), identity),
+    new FastifyAdapter(),
+    { logger: false, abortOnError: false },
+  );
+  try {
+    server.useGlobalFilters(new ApiErrorFilter());
+    await server.listen(0, '127.0.0.1');
+    const port = (server.getHttpServer().address() as { port: number }).port;
+    const url = `http://127.0.0.1:${port}`;
+    for (const path of ['/health/live', '/health/ready'])
+      expect((await fetch(`${url}${path}`)).status).toBe(200);
+    expect(calls).toEqual([]);
+    const w = await open();
+    const bet = command(w);
+    const result = await submit(bet);
+    const { idempotencyKey, ...win } = command(w, 'WIN', '1.00');
+    const routes = [
+      {
+        method: 'POST',
+        path: '/wallets',
+        body: { playerId: randomUUID(), initialBalance: { amount: '0.00', currency: 'BRL' } },
+        status: 201,
+      },
+      { method: 'GET', path: `/wallets/${w.id}`, status: 200 },
+      { method: 'GET', path: `/wallets/${w.id}/ledger`, status: 200 },
+      { method: 'GET', path: `/wagering/transactions/${result.data.transactionId}`, status: 200 },
+      {
+        method: 'GET',
+        path: `/providers/${bet.providerId}/wagering/transactions/${bet.externalTransactionId}`,
+        status: 200,
+      },
+      { method: 'POST', path: '/wagering/transactions', body: win, status: 200 },
+      { method: 'POST', path: `/wallets/${w.id}/reconciliation`, body: {}, status: 200 },
+      { method: 'GET', path: '/metrics', status: 200 },
+    ];
+    for (const route of routes) {
+      const response = await fetch(`${url}${route.path}`, {
+        method: route.method,
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+        ...('body' in route ? { body: JSON.stringify(route.body) } : {}),
+      });
+      expect(response.status).toBe(401);
+    }
+    expect(calls).toEqual(routes.map((route) => `${route.method} ${route.path}`));
+    expect((await balance(w)).balance.amount).toBe('90.00');
+    expect(await ledgerCount(w)).toBe(2);
+    expect(
+      await scalar('SELECT count(*)::text AS count FROM wager_transactions WHERE idempotency_key=?', [
+        idempotencyKey,
+      ]),
+    ).toBe(0);
+    calls.length = 0;
+    for (const route of routes) {
+      const response = await fetch(`${url}${route.path}`, {
+        method: route.method,
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+          Authorization: 'Bearer test-only',
+        },
+        ...('body' in route ? { body: JSON.stringify(route.body) } : {}),
+      });
+      expect(response.status).toBe(route.status);
+      if (route.path === '/metrics') expect(response.headers.get('content-type')).toContain('text/plain');
+    }
+    expect(calls).toEqual(routes.map((route) => `${route.method} ${route.path}`));
+    expect((await balance(w)).balance.amount).toBe('91.00');
+    expect(await ledgerCount(w)).toBe(3);
+  } finally {
+    await server.close();
+    await guardDb.close();
+    metrics.registry.clear();
   }
   await integrity();
 });
