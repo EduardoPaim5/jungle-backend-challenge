@@ -14,6 +14,12 @@ A ordem confirmada é reconstruída a partir das versões do ledger. O oráculo 
 
 Consultas foram exercitadas com barras codificadas, percentuais literais, pontuação de query, aspas, contrabarra, espaços e Unicode composto/decomposto, além de emojis no limite de comprimento. Chaves idempotentes de 256 caracteres funcionam; 257 retornam 400. Dinheiro com zeros à esquerda e UUIDs em maiúsculas preservam o replay da entrada canônica, sem novo crédito. Os cenários passaram sem nova correção de produção.
 
+## Sincronização do teste de eventos
+
+As primeiras execuções locais passaram nos dois ambientes. A [primeira CI desta rodada](https://github.com/EduardoPaim5/jungle-backend-challenge/actions/runs/37831483580) revelou uma espera frágil no teste existente de publishers: em MiniStack, a assertion exigia um recibo específico depois de apenas 100 ms, embora a condição anterior garantisse somente que algum evento já havia sido consumido. Essa execução teve 41 integrações aprovadas e uma falha; LocalStack passou também na prova adicional de recuperação.
+
+O teste agora aguarda o recibo do eventId específico e observa confirmações SQS bem-sucedidas para pelo menos três MessageIds distintos desse evento: a publicação original e duas cópias com dedupIds diferentes. Só depois exige exatamente um recibo no PostgreSQL. Um proxy de teste encaminha chamadas ao broker real e atrasa a entrega desse evento em 250 ms, exercitando uma latência maior que a espera anterior. O consumo completo das cópias é comprovado, sem depender de um sleep curto ou relaxar a unicidade esperada. O proxy e os processos participantes são encerrados em finally.
+
 ## Persistência dos brokers
 
 `bun run test:recovery` cria um projeto e volume próprios, usando a mesma imagem fixada e configuração de persistência do Compose. As filas são criadas uma vez. Cada ciclo envia 12 mensagens únicas para entrada, eventos e DLQ; cinco mensagens da entrada são recebidas sem ack antes do encerramento. Os ciclos 2 a 5 mantêm quatro long polls de 20 segundos ativos em uma fila vazia durante o shutdown.

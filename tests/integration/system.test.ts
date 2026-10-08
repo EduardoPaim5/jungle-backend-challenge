@@ -759,60 +759,118 @@ test('DLQ persiste mensagens permanentes e esgotadas pelo broker antes de remov�
   await integrity();
 });
 test('dois publishers, crash após envio e lease expirada: eventId estável e confirmação protegida', async () => {
-  const doomed = await start('publisher', { TEST_FAULT_POINT: 'after-publish', WORK_LEASE_MS: '500' });
-  await doomed.wait('barrier');
-  await doomed.stop('SIGKILL');
-  const first = await start('publisher,events');
-  const second = await start('publisher');
-  await eventually(
-    () => scalar('SELECT count(*)::text AS count FROM outbox_messages WHERE published_at IS NULL'),
-    (x) => x === 0,
-    20000,
-  );
-  await eventually(
-    () => scalar('SELECT count(*)::text AS count FROM integration_event_receipts'),
-    (asyncExpected) => asyncExpected > 0,
-  );
   const [event] = await db.query<{ id: string; wallet_id: string; payload: Record<string, unknown> }>(
-    'SELECT * FROM outbox_messages ORDER BY occurred_at LIMIT 1',
+    'SELECT * FROM outbox_messages ORDER BY occurred_at,id LIMIT 1',
   );
-  await queues.send(queues.names.events, JSON.stringify(event!.payload), event!.wallet_id, randomUUID());
-  await queues.send(queues.names.events, JSON.stringify(event!.payload), event!.wallet_id, randomUUID());
-  await Bun.sleep(100);
-  expect(
-    await scalar('SELECT count(*)::text AS count FROM integration_event_receipts WHERE event_id=?', [
-      event!.id,
-    ]),
-  ).toBe(1);
-  await first.stop();
-  await second.stop();
-  const w = await open();
-  const stale = await start('publisher', { TEST_FAULT_POINT: 'publisher-before-send', WORK_LEASE_MS: '300' });
-  await stale.wait('barrier');
-  await Bun.sleep(400);
-  const replacement = await start('publisher');
-  await eventually(
-    () =>
-      scalar(
-        'SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND published_at IS NULL',
-        [w.id],
-      ),
-    (x) => x === 0,
-  );
-  const snapshots = await db.query(
-    'SELECT id,published_at,attempts FROM outbox_messages WHERE wallet_id=? ORDER BY id',
-    [w.id],
-  );
-  stale.child.send({ type: 'release-fault' });
-  await Bun.sleep(100);
-  expect(
-    await db.query('SELECT id,published_at,attempts FROM outbox_messages WHERE wallet_id=? ORDER BY id', [
-      w.id,
-    ]),
-  ).toEqual(snapshots);
-  await stale.stop();
-  await replacement.stop();
-  await integrity();
+  const receipts = new Map<string, string>();
+  const acknowledgements = new Set<string>();
+  const upstream = new URL(queues.endpoint);
+  const proxy = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const text = await request.text();
+      const command = text ? JSON.parse(text) : {};
+      try {
+        const response = await fetch(new URL(new URL(request.url).pathname, upstream), {
+          method: request.method,
+          headers: request.headers,
+          body: text,
+          signal: request.signal,
+        });
+        const body = await response.text();
+        if (response.ok && request.headers.get('x-amz-target')?.endsWith('.ReceiveMessage')) {
+          let delayed = false;
+          for (const message of JSON.parse(body).Messages ?? []) {
+            if (JSON.parse(message.Body).eventId === event!.id) {
+              receipts.set(message.ReceiptHandle, message.MessageId);
+              delayed = true;
+            }
+          }
+          // Exercise real consumption with latency beyond the old fixed 100 ms assertion.
+          if (delayed) await Bun.sleep(250);
+        }
+        if (response.ok && request.headers.get('x-amz-target')?.endsWith('.DeleteMessage')) {
+          const messageId = receipts.get(command.ReceiptHandle);
+          if (messageId) acknowledgements.add(messageId);
+        }
+        return new Response(body, { status: response.status, headers: response.headers });
+      } catch {
+        return new Response('Forwarding cancelled', { status: 503 });
+      }
+    },
+  });
+  const participants: App[] = [];
+  const track = async (roles: string, extra: Record<string, string> = {}) => {
+    const app = await start(roles, extra);
+    participants.push(app);
+    return app;
+  };
+  try {
+    const doomed = await track('publisher', { TEST_FAULT_POINT: 'after-publish', WORK_LEASE_MS: '500' });
+    await doomed.wait('barrier');
+    await doomed.stop('SIGKILL');
+    const first = await track('publisher,events', { AWS_ENDPOINT_URL: proxy.url.origin });
+    const second = await track('publisher');
+    await eventually(
+      () => scalar('SELECT count(*)::text AS count FROM outbox_messages WHERE published_at IS NULL'),
+      (x) => x === 0,
+      20000,
+    );
+    await eventually(
+      () =>
+        scalar('SELECT count(*)::text AS count FROM integration_event_receipts WHERE event_id=?', [
+          event!.id,
+        ]),
+      (count) => count === 1,
+    );
+    await queues.send(queues.names.events, JSON.stringify(event!.payload), event!.wallet_id, randomUUID());
+    await queues.send(queues.names.events, JSON.stringify(event!.payload), event!.wallet_id, randomUUID());
+    await eventually(
+      async () => acknowledgements.size,
+      (count) => count >= 3,
+    );
+    expect(
+      await scalar('SELECT count(*)::text AS count FROM integration_event_receipts WHERE event_id=?', [
+        event!.id,
+      ]),
+    ).toBe(1);
+    await first.stop();
+    await second.stop();
+    const w = await open();
+    const stale = await track('publisher', {
+      TEST_FAULT_POINT: 'publisher-before-send',
+      WORK_LEASE_MS: '300',
+    });
+    await stale.wait('barrier');
+    await Bun.sleep(400);
+    const replacement = await track('publisher');
+    await eventually(
+      () =>
+        scalar(
+          'SELECT count(*)::text AS count FROM outbox_messages WHERE wallet_id=? AND published_at IS NULL',
+          [w.id],
+        ),
+      (x) => x === 0,
+    );
+    const snapshots = await db.query(
+      'SELECT id,published_at,attempts FROM outbox_messages WHERE wallet_id=? ORDER BY id',
+      [w.id],
+    );
+    stale.child.send({ type: 'release-fault' });
+    await Bun.sleep(100);
+    expect(
+      await db.query('SELECT id,published_at,attempts FROM outbox_messages WHERE wallet_id=? ORDER BY id', [
+        w.id,
+      ]),
+    ).toEqual(snapshots);
+    await stale.stop();
+    await replacement.stop();
+    await integrity();
+  } finally {
+    await Promise.all(participants.map((app) => app.stop()));
+    await proxy.stop(true);
+  }
 }, 30000);
 test('indisponibilidade de SQS conserva outbox e retomada publica eventos confirmados', async () => {
   const originalEndpoint = process.env.AWS_ENDPOINT_URL;
