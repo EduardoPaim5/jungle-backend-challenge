@@ -237,3 +237,41 @@ test('hash de negócio ignora transporte/chave, normaliza dinheiro e ausência d
   expect(() => parseCommand({ ...body, kind: 'OPENING' }, 'key')).toThrow();
   expect(() => parseCommand(body, undefined)).toThrow();
 });
+test('mesma chave com payload divergente não corresponde à identidade da transação original', () => {
+  const body = {
+    providerId: 'p',
+    externalTransactionId: 'e',
+    playerId: crypto.randomUUID(),
+    walletId: crypto.randomUUID(),
+    roundId: 'r',
+    gameId: 'g',
+    kind: 'BET',
+    money: { amount: '10.00', currency: 'BRL' },
+  };
+  const original = parseCommand(body, 'same-key');
+  const originalHash = businessHash(original);
+  const tx = WagerTransaction.create({
+    ...original,
+    id: 'original-transaction',
+    payloadHash: originalHash,
+    money: Money.from(original.money),
+    referenceExternalTransactionId: undefined,
+    createdAt: new Date(),
+  });
+  tx.markProcessed(undefined, new Date());
+  expect(tx.matchesPayload(businessHash(parseCommand(body, 'same-key')))).toBe(true);
+  for (const divergent of [
+    { ...body, money: { amount: '10.01', currency: 'BRL' } },
+    { ...body, kind: 'WIN' },
+    { ...body, roundId: 'other-round' },
+    { ...body, gameId: 'other-game' },
+    { ...body, externalTransactionId: 'other-external' },
+  ]) {
+    const changed = parseCommand(divergent, 'same-key');
+    expect(changed.idempotencyKey).toBe(original.idempotencyKey);
+    expect(tx.matchesPayload(businessHash(changed))).toBe(false);
+  }
+  expect(tx.status).toBe('PROCESSED');
+  expect(tx.money.toJSON()).toEqual(original.money);
+  expect(tx.matchesPayload(originalHash)).toBe(true);
+});

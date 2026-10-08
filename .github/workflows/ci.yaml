@@ -20,6 +20,7 @@ jobs:
         with:
           bun-version: '1.4.2'
       - run: bun install --frozen-lockfile
+      - run: bun audit
       - run: docker compose --profile portable up -d --wait postgres ministack
       - run: bun run verify
       - if: failure()
@@ -39,6 +40,7 @@ jobs:
         with:
           bun-version: '1.4.2'
       - run: bun install --frozen-lockfile
+      - run: bun audit
       - name: Validate secret
         run: test -n "$LOCALSTACK_AUTH_TOKEN" || { echo 'Configure repository secret LOCALSTACK_AUTH_TOKEN'; exit 1; }
       - run: docker compose --profile reference up -d --wait postgres localstack
