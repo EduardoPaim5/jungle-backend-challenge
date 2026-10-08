@@ -1217,6 +1217,48 @@ test('consultas preservam resultado original e recusam cursor de outra wallet ou
   await integrity();
 });
 
+test('consultas externas recuperam identificadores válidos com 128 caracteres e caracteres multibyte', async () => {
+  const w = await open();
+  for (const character of ['a', 'á']) {
+    const c = command(w, 'WIN', '1.00');
+    c.providerId = character.repeat(128);
+    c.externalTransactionId = character.toUpperCase().repeat(128);
+    const submitted = await submit(c);
+    expect(submitted.status).toBe(200);
+    const response = await http<ProcessingResult & { providerId: string; externalTransactionId: string }>(
+      apis[1]!,
+      `/providers/${encodeURIComponent(c.providerId)}/wagering/transactions/${encodeURIComponent(c.externalTransactionId)}`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.data.transactionId).toBe(submitted.data.transactionId);
+    expect(response.data.providerId).toBe(c.providerId);
+    expect(response.data.externalTransactionId).toBe(c.externalTransactionId);
+  }
+  await integrity();
+});
+
+test('consultas externas recusam controles, identidade vazia e excesso de tamanho com HTTP 400', async () => {
+  for (const [provider, external] of [
+    ['provider\u0000', 'external'],
+    ['provider', 'external\u0000'],
+    [' ', 'external'],
+    ['provider', ' '],
+    ['p'.repeat(129), 'external'],
+    ['provider', 'e'.repeat(129)],
+  ]) {
+    const response = await http<{ code: string }>(
+      apis[0]!,
+      `/providers/${encodeURIComponent(provider!)}/wagering/transactions/${encodeURIComponent(external!)}`,
+    );
+    expect(response.status).toBe(400);
+    expect(response.data.code).toBe('INVALID_REQUEST');
+  }
+  expect(
+    (await http(apis[0]!, '/providers/missing-provider/wagering/transactions/missing-external')).status,
+  ).toBe(404);
+  await integrity();
+});
+
 test('reconciliação usa um snapshot consistente quando há commit entre suas duas leituras', async () => {
   const w = await open();
   const observer = await start('api', { TEST_FAULT_POINT: 'reconciliation-after-wallet' });

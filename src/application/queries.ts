@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { Database, WalletSchema } from '../infrastructure/database.js';
 import { Observability, logger } from '../infrastructure/observability.js';
 import { Money } from '../domain/money.js';
-import { ServiceError } from './contracts.js';
+import { assertExternalIdentity, ServiceError } from './contracts.js';
 import type { TransactionRow } from './wagering.js';
 import { fault } from '../infrastructure/faults.js';
 
@@ -29,6 +29,7 @@ export class Queries {
     return this.lookup('id=?', [uuid(id)]);
   }
   async external(provider: string, external: string) {
+    assertExternalIdentity(provider, external);
     return this.lookup('provider_id=? AND external_transaction_id=?', [provider, external]);
   }
   private async lookup(where: string, params: string[]) {

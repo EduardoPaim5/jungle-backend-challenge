@@ -9,6 +9,7 @@ import { Queues } from './infrastructure/sqs.js';
 import { Observability, logger } from './infrastructure/observability.js';
 import { Publisher, QueueConsumer, ReferenceWorker, type LoopWorker } from './infrastructure/workers.js';
 import { Wagering } from './application/wagering.js';
+import { MAX_IDENTIFIER_LENGTH } from './application/contracts.js';
 import { ApiErrorFilter, ApiModule } from './http/api.js';
 
 if ((process.env.AUTH_MODE ?? 'development') !== 'development')
@@ -35,6 +36,8 @@ let port: number | undefined;
 if (roles.has('api')) {
   const adapter = new FastifyAdapter({
     bodyLimit: 32768,
+    // Let business validation handle oversized identifiers, including multibyte paths.
+    routerOptions: { maxParamLength: MAX_IDENTIFIER_LENGTH * 2 },
     requestIdHeader: false,
     genReqId: (req: IncomingMessage) => {
       const value = req.headers['x-correlation-id'];

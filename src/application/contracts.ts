@@ -12,7 +12,8 @@ export function isPersistableIdentifier(value: string): boolean {
     Buffer.from(value, 'utf8').toString('utf8') === value
   );
 }
-const identifier = z.string().min(1).max(128).refine(isPersistableIdentifier);
+export const MAX_IDENTIFIER_LENGTH = 128;
+const identifier = z.string().min(1).max(MAX_IDENTIFIER_LENGTH).refine(isPersistableIdentifier);
 const moneySchema = z.object({ amount: z.string().max(128), currency: z.string().regex(/^[A-Z]{3}$/) });
 export const walletInput = z.object({ playerId: z.uuid(), initialBalance: moneySchema });
 const wageringInput = z
@@ -57,6 +58,10 @@ export class ServiceError extends Error {
   ) {
     super(code);
   }
+}
+export function assertExternalIdentity(provider: string, external: string): void {
+  if (![provider, external].every((value) => identifier.safeParse(value).success))
+    throw new ServiceError('INVALID_REQUEST', 400);
 }
 export function parseCommand(body: unknown, key: unknown): WagerCommand {
   const p = wageringInput.safeParse(body);
