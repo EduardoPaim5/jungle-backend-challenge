@@ -4,11 +4,15 @@ Processador financeiro com Bun, NestJS/Fastify, MikroORM e PostgreSQL. HTTP e SQ
 
 Implementação do [desafio oficial](https://github.com/junglegaming/backend-challenge), consultado no commit `c7143e6d041585d6913f56eb7415105e074f83dc`. A [matriz de requisitos](docs/REQUIREMENTS.md) aponta implementação e provas. As decisões, o modelo de falhas e as limitações estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
+**Roteiro de avaliação:** comece pelo setup abaixo e execute o demo. A seção [Testes e verificação](#testes-e-verificação) permite reproduzir a suíte completa e a recuperação nos dois brokers, além do teste de carga. Os [resultados registrados](docs/results/README.md) incluem relatórios JSON e análise das limitações; novas execuções gravam seus próprios relatórios em `artifacts/`. A [CI](https://github.com/EduardoPaim5/jungle-backend-challenge/actions) permite conferir as execuções por commit. O perfil MiniStack permite avaliar a solução sem token LocalStack.
+
 ## Executar em cinco minutos
 
-Requisitos: **Bun 1.4.2**, Docker com Compose v2+ e portas locais `55432`/`4566` livres. Todas as dependências têm versões exatas e lockfile; as imagens externas estão fixadas por digest. O serviço também pode executar inteiramente em containers.
+Requisitos: **Bun 1.4.2**, Docker com **Compose 2.24.4 ou mais recente** e portas locais `55432`/`4566` livres. Todas as dependências têm versões exatas e lockfile; as imagens externas estão fixadas por digest. O serviço também pode executar inteiramente em containers.
 
 ```bash
+git clone https://github.com/EduardoPaim5/jungle-backend-challenge.git
+cd jungle-backend-challenge
 bun install --frozen-lockfile
 cp .env.example .env.local
 chmod 600 .env.local
@@ -28,6 +32,18 @@ bun run start
 ```
 
 API: `http://localhost:3000`; OpenAPI: [http://localhost:3000/docs](http://localhost:3000/docs); JSON: `/docs-json`; métricas: `/metrics`.
+
+Com a aplicação ativa, abra outro terminal para conferir os endpoints:
+
+```bash
+curl -fsS http://127.0.0.1:3000/health/live
+curl -fsS http://127.0.0.1:3000/health/ready
+curl -fsS -o /dev/null -w 'Swagger: HTTP %{http_code}\n' http://127.0.0.1:3000/docs
+curl -fsS -o /dev/null -w 'OpenAPI: HTTP %{http_code}\n' http://127.0.0.1:3000/docs-json
+curl -fsS -o /dev/null -w 'Metrics: HTTP %{http_code}\n' http://127.0.0.1:3000/metrics
+```
+
+Todos devem retornar HTTP 200. `Ctrl+C` no terminal da aplicação solicita o shutdown gracioso. No demo, o replay deve indicar `idempotentReplay: true`, a referência deve terminar em `PROCESSED` e a reconciliação deve indicar `consistent: true`.
 
 **Autenticação:** `AUTH_MODE=development` é explícito e não autentica usuários. Um guard global chama `IdentityPort` em todas as rotas de negócio e em `/metrics`; os health checks permanecem públicos. A documentação Swagger também fica aberta no perfil local. `IdentityPort` é o ponto de integração com um IdP OIDC. Outro modo exige um adaptador e impede o startup enquanto ele não existir. Este perfil local atende à extensão de identidade permitida pelo enunciado; não representa uma API pronta para exposição pública em produção.
 
@@ -63,17 +79,30 @@ MiniStack:
 
 ```bash
 docker compose --profile portable --profile application up -d --build --scale app=3
-docker compose port --index 1 app 3000
+docker compose --profile application port --index 1 app 3000
 ```
 
 LocalStack:
 
 ```bash
 BROKER_HOST=localstack docker compose --env-file .env.local --profile reference --profile application up -d --build --scale app=3
-docker compose port --index 1 app 3000
+docker compose --profile application port --index 1 app 3000
 ```
 
-O job `setup` aplica migrations com o papel proprietário e cria as filas. A aplicação executa como usuário não privilegiado do container e como `jungle_app` no PostgreSQL. Cada instância recebe uma porta HTTP diferente, exibida pelo comando `port`. Use essa porta em `API_URL=http://127.0.0.1:PORTA bun run demo` para direcionar o demo ao serviço existente.
+O job `setup` aplica migrations com o papel proprietário e cria as filas. A aplicação executa como usuário não privilegiado do container e como `jungle_app` no PostgreSQL. Cada instância recebe uma porta HTTP diferente, exibida pelo comando `port`. Com o ambiente local configurado pelo setup anterior e as três instâncias iniciadas, execute o demo nos containers:
+
+```bash
+JUNGLE_API_1="http://$(docker compose --profile application port --index 1 app 3000)"
+JUNGLE_API_2="http://$(docker compose --profile application port --index 2 app 3000)"
+JUNGLE_API_3="http://$(docker compose --profile application port --index 3 app 3000)"
+
+curl -fsS "$JUNGLE_API_1/health/ready"
+curl -fsS "$JUNGLE_API_2/health/ready"
+curl -fsS "$JUNGLE_API_3/health/ready"
+API_URLS="$JUNGLE_API_1,$JUNGLE_API_2,$JUNGLE_API_3" bun run demo
+```
+
+`API_URLS` fornece as três URLs usadas pelo cenário de replay entre instâncias; o demo utiliza os serviços existentes e não inicia processos adicionais.
 
 ## Testes e verificação
 
@@ -101,6 +130,8 @@ TEST_BROKER=ministack bun run test:isolated
 
 O primeiro comando usa LocalStack e exige o token configurado; o segundo usa MiniStack. O script cria um projeto Compose exclusivo com portas de loopback próprias, executa `verify` incluindo os reinícios reais e remove seus containers e volumes ao concluir ou falhar. Cada integração continua criando seu banco e filas exclusivos. Esses comandos exigem Docker Compose 2.24.4 ou mais recente, com [suporte a `!override`](https://docs.docker.com/reference/compose-file/merge/#replace-value).
 
+Cada execução completa verifica formatação, tipos, build, **25 testes unitários e 42 de integração**, sem cenários skipped. O esperado é zero falhas e `success: true` no relatório final, gravado em `artifacts/jungle-verify-*/report.json`. Para verificar também as dependências instaladas, execute `bun audit`.
+
 A prova adicional de persistência repete cinco reinícios graciosos em um broker isolado, verificando entrada, eventos e DLQ, mensagens recebidas sem ack e long polling ativo durante o encerramento:
 
 ```bash
@@ -110,9 +141,13 @@ RECOVERY_BROKER=ministack bun run test:recovery
 
 `RECOVERY_CYCLES` permite entre 1 e 20 ciclos. As filas são criadas antes dos ciclos; a verificação após cada reinício apenas consulta e recebe as mensagens. Os relatórios e logs de diagnóstico ficam em `artifacts/jungle-recovery-*/`; a CI também executa essa prova nos dois brokers.
 
+No padrão de cinco ciclos, cada ciclo deve recuperar as 36 mensagens enviadas, totalizando 180 por broker, com `exitCode: 0`, `oomKilled: false` e `success: true` no relatório final.
+
 O teste de carga inicia três processos por padrão, compara uma wallet com 24 wallets, aquece cada topologia, faz três repetições de 600 requisições com concorrência 24 e inclui 10% de rejeições deliberadas. Reporta ambiente, throughput, p50/p95/p99, erros técnicos, rejeições esperadas, conflitos, espera de lock e atraso da outbox. Confere reconciliação e drenagem da outbox ao final. O resultado é gravado em `artifacts/load.json`; uma execução registrada está em [docs/results](docs/results/README.md). Não estabelece capacidade de produção.
 
 Configuração opcional: `LOAD_REQUESTS`, `LOAD_CONCURRENCY`, `LOAD_REPETITIONS`, `LOAD_DRAIN_SECONDS` (180), `LOAD_REPORT`, `API_URLS` (URLs separadas por vírgula), `BROKER_LABEL`.
+
+O esperado na carga é `technicalErrors: 0` e `consistent: true` em todas as medições, drenagem da outbox ao final e `success: true` na saída final. As rejeições deliberadas são apresentadas separadamente dos erros técnicos. Para conservar um relatório anterior, use `BROKER_LABEL=LocalStack LOAD_REPORT=artifacts/load-manual.json bun run test:load` no perfil LocalStack.
 
 `bun run environment:check` verifica acesso ao PostgreSQL com o papel da aplicação, schema das migrations e disponibilidade das três filas SQS. `test:load` e `demo` executam essa verificação antes do build e de iniciar processos. Se os containers estiverem parados, as migrations ausentes ou as filas ainda não criadas, o comando termina com diagnóstico e instruções de setup, sem iniciar a carga. A verificação apenas lê o ambiente; não cria recursos nem altera dados. Dependências ainda podem ficar indisponíveis durante a execução, e esses erros continuam sendo reportados pelo teste.
 
