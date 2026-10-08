@@ -14,10 +14,11 @@
     "db:migrate": "bun scripts/migrate.ts up",
     "db:rollback": "bun scripts/migrate.ts down",
     "queues:init": "bun scripts/queues.ts",
+    "environment:check": "bun scripts/check-environment.ts",
     "test": "bun test tests/unit",
     "test:integration": "bun run build && bun test tests/integration --timeout 120000",
-    "test:load": "bun run build && bun scripts/load.ts",
-    "demo": "bun run build && bun scripts/demo.ts",
+    "test:load": "bun run environment:check && bun run build && bun scripts/load.ts",
+    "demo": "bun run environment:check && bun run build && bun scripts/demo.ts",
     "verify": "bun run format:check && bun run typecheck && bun run test && bun run test:integration"
   },
   "dependencies": {

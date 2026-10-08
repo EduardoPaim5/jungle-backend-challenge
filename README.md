@@ -38,6 +38,7 @@ Crie um Developer Auth Token no [portal LocalStack](https://app.localstack.cloud
 ```bash
 docker compose --profile portable stop ministack
 docker compose --env-file .env.local --profile reference up -d --wait postgres localstack
+bun run db:migrate
 bun run queues:init
 TEST_BROKER=localstack bun run verify
 BROKER_LABEL=LocalStack bun run test:load
@@ -78,6 +79,7 @@ O job `setup` aplica migrations com o papel proprietário e cria as filas. A apl
 
 ```bash
 bun run typecheck
+bun run environment:check
 bun run test
 bun run test:integration
 TEST_BROKER=localstack bun run verify
@@ -93,6 +95,8 @@ Provas incluem 50 submissões simultâneas, apostas de 80 contra saldo de 100, w
 O teste de carga inicia três processos por padrão, compara uma wallet com 24 wallets, aquece cada topologia, faz três repetições de 600 requisições com concorrência 24 e inclui 10% de rejeições deliberadas. Reporta ambiente, throughput, p50/p95/p99, erros técnicos, rejeições esperadas, conflitos, espera de lock e atraso da outbox. Confere reconciliação e drenagem da outbox ao final. O resultado é gravado em `artifacts/load.json`; uma execução registrada está em [docs/results](docs/results/README.md). Não estabelece capacidade de produção.
 
 Configuração opcional: `LOAD_REQUESTS`, `LOAD_CONCURRENCY`, `LOAD_REPETITIONS`, `LOAD_DRAIN_SECONDS` (180), `LOAD_REPORT`, `API_URLS` (URLs separadas por vírgula), `BROKER_LABEL`.
+
+`bun run environment:check` verifica acesso ao PostgreSQL com o papel da aplicação, schema das migrations e disponibilidade das três filas SQS. `test:load` e `demo` executam essa verificação antes do build e de iniciar processos. Se os containers estiverem parados, as migrations ausentes ou as filas ainda não criadas, o comando termina com diagnóstico e instruções de setup, sem iniciar a carga. A verificação apenas lê o ambiente; não cria recursos nem altera dados. Dependências ainda podem ficar indisponíveis durante a execução, e esses erros continuam sendo reportados pelo teste.
 
 ## Contrato HTTP
 
