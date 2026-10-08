@@ -92,6 +92,24 @@ A integração cria um **banco isolado**, aplica **up/down completo/up**, cria f
 
 Provas incluem 50 submissões simultâneas, apostas de 80 contra saldo de 100, wallets distintas, HTTP/SQS, reversões concorrentes, referências fora de ordem, snapshots de replay, constraints, corrupção administrativa isolada, morte antes do commit/depois do commit/antes do ack/depois do envio, leases expiradas, publisher antigo, dois publishers, erros permanentes, retry, DLQ e shutdown.
 
+Para executar toda a verificação em containers e volumes novos, sem parar os serviços do ambiente de desenvolvimento:
+
+```bash
+bun run test:isolated
+TEST_BROKER=ministack bun run test:isolated
+```
+
+O primeiro comando usa LocalStack e exige o token configurado; o segundo usa MiniStack. O script cria um projeto Compose exclusivo com portas de loopback próprias, executa `verify` incluindo os reinícios reais e remove seus containers e volumes ao concluir ou falhar. Cada integração continua criando seu banco e filas exclusivos. Esses comandos exigem Docker Compose 2.24.4 ou mais recente, com [suporte a `!override`](https://docs.docker.com/reference/compose-file/merge/#replace-value).
+
+A prova adicional de persistência repete cinco reinícios graciosos em um broker isolado, verificando entrada, eventos e DLQ, mensagens recebidas sem ack e long polling ativo durante o encerramento:
+
+```bash
+bun run test:recovery
+RECOVERY_BROKER=ministack bun run test:recovery
+```
+
+`RECOVERY_CYCLES` permite entre 1 e 20 ciclos. As filas são criadas antes dos ciclos; a verificação após cada reinício apenas consulta e recebe as mensagens. Os relatórios e logs de diagnóstico ficam em `artifacts/jungle-recovery-*/`; a CI também executa essa prova nos dois brokers.
+
 O teste de carga inicia três processos por padrão, compara uma wallet com 24 wallets, aquece cada topologia, faz três repetições de 600 requisições com concorrência 24 e inclui 10% de rejeições deliberadas. Reporta ambiente, throughput, p50/p95/p99, erros técnicos, rejeições esperadas, conflitos, espera de lock e atraso da outbox. Confere reconciliação e drenagem da outbox ao final. O resultado é gravado em `artifacts/load.json`; uma execução registrada está em [docs/results](docs/results/README.md). Não estabelece capacidade de produção.
 
 Configuração opcional: `LOAD_REQUESTS`, `LOAD_CONCURRENCY`, `LOAD_REPETITIONS`, `LOAD_DRAIN_SECONDS` (180), `LOAD_REPORT`, `API_URLS` (URLs separadas por vírgula), `BROKER_LABEL`.

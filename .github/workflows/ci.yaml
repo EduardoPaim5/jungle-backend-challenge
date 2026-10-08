@@ -23,6 +23,7 @@ jobs:
       - run: bun audit
       - run: docker compose --profile portable up -d --wait postgres ministack
       - run: bun run verify
+      - run: RECOVERY_BROKER=ministack bun run test:recovery
       - if: failure()
         run: docker compose --profile portable logs --tail 100
       - if: always()
@@ -45,6 +46,7 @@ jobs:
         run: test -n "$LOCALSTACK_AUTH_TOKEN" || { echo 'Configure repository secret LOCALSTACK_AUTH_TOKEN'; exit 1; }
       - run: docker compose --profile reference up -d --wait postgres localstack
       - run: bun run verify
+      - run: RECOVERY_BROKER=localstack bun run test:recovery
       - if: failure()
         run: docker compose --profile reference logs --tail 100
       - if: always()

@@ -34,3 +34,5 @@ A durabilidade externa depende do commit PostgreSQL e da confirmação durável 
 A revisão não identificou falha financeira eliminatória. As limitações de autenticação, retenção, ordenação de eventos e durabilidade do emulador estão documentadas. A identidade permanece uma extensão de desenvolvimento deliberada, aceita pelo enunciado; expor a API em produção exige o adaptador OIDC e autorização descritos na arquitetura.
 
 A aprovação técnica nesta rodada se apoia nos testes e evidências apresentados; não prevê a pontuação dos avaliadores nem capacidade de produção a partir do benchmark local.
+
+A [validação adicional posterior](additional-validation.md) amplia os cenários e registra novos experimentos isolados de persistência, mantendo o incidente e os limites desta conclusão explícitos.

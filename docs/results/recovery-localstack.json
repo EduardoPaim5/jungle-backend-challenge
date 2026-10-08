@@ -1,0 +1,70 @@
+{
+  "recordedAt": "2026-10-08T19:12:13.150Z",
+  "broker": "localstack",
+  "project": "jungle-recovery-7d816d67",
+  "methodology": "Fresh isolated Compose project and volume; same pinned image and persistence configuration as the application. Each graceful restart checks input, events and DLQ identities plus all acknowledged sends, including unacknowledged receives. Later cycles keep four empty-queue long polls in flight during shutdown. Queues are created once, never recreated after a restart. Resources are removed after recording evidence.",
+  "cycles": [
+    {
+      "cycle": 1,
+      "activeLongPolls": 0,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 4.796405849000003,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32782,
+      "readySeconds": 7.085511757
+    },
+    {
+      "cycle": 2,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 2.1119980840000028,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32784,
+      "readySeconds": 5.112576595999999
+    },
+    {
+      "cycle": 3,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 3.31218533,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32785,
+      "readySeconds": 6.289125008000003
+    },
+    {
+      "cycle": 4,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 2.9915414359999994,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32787,
+      "readySeconds": 6.646848990999999
+    },
+    {
+      "cycle": 5,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 3.1044340659999943,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32788,
+      "readySeconds": 5.1063227509999995
+    }
+  ],
+  "success": true,
+  "image": "localstack/localstack:2026.09.1@sha256:0c644ede65c2d0c95737e09a39007828bd381bdb07ca8200c6bf17d66a4ed191"
+}

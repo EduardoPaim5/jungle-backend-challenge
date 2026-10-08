@@ -1,6 +1,6 @@
 # Validação adversarial adicional
 
-Esta rodada acrescentou onze cenários de integração e uma prova de domínio à suíte original. Após o [tratamento da auditoria independente](audit-follow-up.md), a suíte atual contém **25 testes unitários e 34 de integração**, incluindo também payload divergente e guard global de identidade. Os testes continuam usando PostgreSQL e SQS reais e pelo menos três processos da aplicação.
+Esta rodada acrescentou onze cenários de integração e uma prova de domínio à suíte original. Na execução registrada após o [tratamento da auditoria independente](audit-follow-up.md), a suíte continha **25 testes unitários e 34 de integração**, incluindo também payload divergente e guard global de identidade. O inventário atual, ampliado nas revisões posteriores, está na [matriz de requisitos](../REQUIREMENTS.md). Os testes continuam usando PostgreSQL e SQS reais e pelo menos três processos da aplicação.
 
 | Cenário                        | Evidência verificada                                                                                                                                                                                                                                                           |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

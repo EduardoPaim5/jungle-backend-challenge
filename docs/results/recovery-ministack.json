@@ -1,0 +1,70 @@
+{
+  "recordedAt": "2026-10-08T19:12:11.986Z",
+  "broker": "ministack",
+  "project": "jungle-recovery-f89a81b8",
+  "methodology": "Fresh isolated Compose project and volume; same pinned image and persistence configuration as the application. Each graceful restart checks input, events and DLQ identities plus all acknowledged sends, including unacknowledged receives. Later cycles keep four empty-queue long polls in flight during shutdown. Queues are created once, never recreated after a restart. Resources are removed after recording evidence.",
+  "cycles": [
+    {
+      "cycle": 1,
+      "activeLongPolls": 0,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 0.9761556770000002,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32781,
+      "readySeconds": 0.26763962399999947
+    },
+    {
+      "cycle": 2,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 20.443057164000003,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32783,
+      "readySeconds": 0.5215951410000016
+    },
+    {
+      "cycle": 3,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 20.181271252999995,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32786,
+      "readySeconds": 0.5164581250000047
+    },
+    {
+      "cycle": 4,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 20.234074506999992,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32789,
+      "readySeconds": 0.5178842329999898
+    },
+    {
+      "cycle": 5,
+      "activeLongPolls": 4,
+      "inFlightReceives": 5,
+      "exitCode": 0,
+      "oomKilled": false,
+      "stopSeconds": 19.99508576100001,
+      "acknowledgedSends": 36,
+      "recoveredUniqueMessages": 36,
+      "brokerPort": 32790,
+      "readySeconds": 0.2632036120000121
+    }
+  ],
+  "success": true,
+  "image": "ministackorg/ministack:1.5.22@sha256:0e51461e29524b884306810ce05c8a2e47f90f0c4dddc5a5f52166d2b56c7818"
+}
