@@ -39,6 +39,8 @@ Money guarda centavos em bigint e é imutável. Conversão decimal usa exclusiva
 
 Referências exigem mesmo provider, player, wallet, moeda e rodada. Game não é critério adicional de igualdade, seguindo o enunciado. BET/LOSS recusam referências; OPENING e provider `__system__` são internos. Reversões são exclusivas **por referência e tipo**: REFUND e ROLLBACK separados sobre a mesma BET são permitidos pelo texto do desafio, apesar de não ser uma regra usual em todo produto financeiro. Não inventamos uma exclusividade global diferente da especificada. Reversões parciais são rejeitadas.
 
+A consequência dessa interpretação é explícita: saldo 100.00 → BET 30.00 → 70.00 → REFUND da BET → 100.00 → ROLLBACK da mesma BET → 130.00. O ledger permanece consistente, mas o efeito líquido é um crédito de 30.00. A regra adicional 4 da seção 7 restringe repetição pelo mesmo tipo de operação; uma exclusividade entre tipos exigiria outro contrato de negócio. Essa distinção precisa ser confirmada com o provedor antes de uma implantação real.
+
 PENDING transiciona para PROCESSED, PENDING_REFERENCE, REJECTED ou FAILED. PENDING_REFERENCE pode continuar pendente ou terminar; terminações não reabrem. Reidratação reconstrói o estado existente e não reaplica regras de criação.
 
 ## Commit, concorrência e schema
@@ -83,9 +85,13 @@ Ledger usa cursor base64url com walletId, último item e limite superior fixado 
 
 Logs registram correlationId, messageId quando aplicável, transactionId, walletId e providerId, sem payload financeiro completo. Métricas não usam identidades individuais como labels. Liveness não chama dependências; readiness verifica PostgreSQL e as três filas. Instâncias somente de workers podem adicionar o papel api para expor health/metrics.
 
+`wager_retries_total{component="reference"}` conta cada tentativa reivindicada de reprocessamento de uma decisão pendente, inclusive a que a finaliza com sucesso. É uma contagem de retentativas, não de falhas. Nos demais componentes, o contador é incrementado ao tratar uma falha para nova tentativa. Um primeiro reprocessamento bem-sucedido de referência continua sendo uma retentativa da submissão original.
+
 ## Identidade, ambientes e limites
 
-O enunciado permite focar nos critérios financeiros e documentar a identidade. DevelopmentIdentity é deliberadamente sem autenticação. Para implantação exposta, implementar adapter OIDC/JWKS com verificação de issuer, audience, assinatura, expiração e rotação, e autorização de provider/player/wallet em guard global; derivar o provider do principal verificado e não confiar no body. Credenciais locais do banco e AWS fictícias são exclusivas do Compose; produção precisa secrets, TLS, grants e observabilidade próprios.
+O enunciado permite focar nos critérios financeiros e documentar a identidade. DevelopmentIdentity é deliberadamente sem autenticação. `IdentityGuard` é registrado globalmente e consulta `IdentityPort` uma vez em cada rota de negócio e em `/metrics`; apenas os handlers de health têm exceção explícita. O adaptador pode ser fornecido ao configurar `ApiModule`. Um teste HTTP real com adaptador restritivo comprova recusa de todas essas rotas e health público. Swagger é servido separadamente pelo plugin e fica aberto neste perfil local.
+
+Para implantação exposta, implementar adapter OIDC/JWKS com verificação de issuer, audience, assinatura, expiração e rotação, e autorização de provider/player/wallet; derivar o provider do principal verificado e não confiar no body. O guard global é a fronteira existente, mas não implementa essas verificações no modo development. Credenciais locais do banco e AWS fictícias são exclusivas do Compose; produção precisa secrets, TLS, grants e observabilidade próprios.
 
 LocalStack é a validação principal; MiniStack executa a mesma suíte portátil. Snapshots no shutdown e load no startup usam a [configuração documentada de persistência](https://docs.localstack.cloud/aws/developer-tools/snapshots/persistence/). Periodic snapshots causaram bloqueios durante long polling no ambiente validado; a configuração escolhida remove essa interferência. Ela preserva reinício **gracioso** do broker, mas não promete durabilidade de mensagens do emulador após SIGKILL. A recuperação de crashes de aplicação é testada separadamente. Em AWS real, a durabilidade do serviço SQS é a fronteira externa.
 

@@ -29,7 +29,7 @@ bun run start
 
 API: `http://localhost:3000`; OpenAPI: [http://localhost:3000/docs](http://localhost:3000/docs); JSON: `/docs-json`; métricas: `/metrics`.
 
-**Autenticação:** `AUTH_MODE=development` é explícito e não autentica usuários. `IdentityPort` é o ponto de integração com um IdP OIDC. Outro modo exige um adaptador e impede o startup enquanto ele não existir. Este perfil local atende à extensão de identidade permitida pelo enunciado; não representa uma API pronta para exposição pública em produção.
+**Autenticação:** `AUTH_MODE=development` é explícito e não autentica usuários. Um guard global chama `IdentityPort` em todas as rotas de negócio e em `/metrics`; os health checks permanecem públicos. A documentação Swagger também fica aberta no perfil local. `IdentityPort` é o ponto de integração com um IdP OIDC. Outro modo exige um adaptador e impede o startup enquanto ele não existir. Este perfil local atende à extensão de identidade permitida pelo enunciado; não representa uma API pronta para exposição pública em produção.
 
 ## LocalStack: ambiente principal
 
@@ -169,7 +169,7 @@ Logs JSON contêm contexto de correlação e decisões, sem payload financeiro c
 
 ## CI e entrega
 
-GitHub Actions executa verificação com MiniStack e LocalStack, incluindo reinício real das dependências. O job LocalStack usa o secret `LOCALSTACK_AUTH_TOKEN`; tokens nunca entram em código. Pull requests externos executam somente a validação portátil, sem acesso ao secret.
+GitHub Actions executa `bun audit` e verificação com MiniStack e LocalStack, incluindo reinício real das dependências. O job LocalStack usa o secret `LOCALSTACK_AUTH_TOKEN`; tokens nunca entram em código. Pull requests externos executam somente a validação portátil, sem acesso ao secret.
 
 Envie **o link deste repositório por e-mail**, conforme a mensagem do recrutamento. A submissão deve incluir o commit entregue, instruções de execução e acesso dos avaliadores; não há formulário ou comando de upload prescrito no README oficial. Um texto de entrega e roteiro de apresentação estão em [docs/DELIVERY.md](docs/DELIVERY.md).
 
