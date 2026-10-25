@@ -6,6 +6,25 @@ Implementação do [desafio oficial](https://github.com/junglegaming/backend-cha
 
 **Roteiro de avaliação:** comece pelo setup abaixo e execute o demo. A seção [Testes e verificação](#testes-e-verificação) permite reproduzir a suíte completa e a recuperação nos dois brokers, além do teste de carga. Os [resultados registrados](docs/results/README.md) incluem relatórios JSON e análise das limitações; novas execuções gravam seus próprios relatórios em `artifacts/`. A [CI](https://github.com/EduardoPaim5/jungle-backend-challenge/actions) permite conferir as execuções por commit. O perfil MiniStack permite avaliar a solução sem token LocalStack.
 
+## O que avaliar primeiro
+
+1. **Domínio:** [`Money`](src/domain/money.ts) representa valores sem ponto flutuante.
+2. **Consistência:** [`Wagering`](src/application/wagering.ts) coordena transação, decisão persistida e eventos.
+3. **Banco:** migrations protegem invariantes financeiras e identidade das mensagens.
+4. **Demonstração:** `bun run demo`, após o setup abaixo, mostra replay entre processos e reconciliação.
+5. **Falhas:** os testes e [resultados registrados](docs/results/README.md) documentam concorrência e recuperação. Números locais não são previsão de capacidade em produção.
+
+```mermaid
+flowchart LR
+    HTTP[HTTP] --> UC[Caso de uso]
+    SQS[SQS] --> UC
+    UC --> DB[(PostgreSQL: decisão, ledger e outbox)]
+    DB --> PUB[Publisher]
+    PUB --> EVT[Eventos SQS]
+```
+
+O projeto é um desafio de portfólio com infraestrutura local reproduzível. O perfil de desenvolvimento não substitui uma integração de identidade para produção.
+
 ## Executar em cinco minutos
 
 Requisitos: **Bun 1.4.2**, Docker com **Compose 2.24.4 ou mais recente** e portas locais `55432`/`4566` livres. Todas as dependências têm versões exatas e lockfile; as imagens externas estão fixadas por digest. O serviço também pode executar inteiramente em containers.
